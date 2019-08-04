@@ -1,0 +1,11 @@
+[package]
+name = "wimd"
+version = "0.1.0"
+authors = ["François Gindraud <francois.gindraud@gmail.com>"]
+edition = "2018"
+description = "Generate a wiki interface from Markdown notes"
+
+[dependencies.pulldown-cmark]
+version = "0.5"
+default-features = false # Do not build the binary
+features = ["simd"]
