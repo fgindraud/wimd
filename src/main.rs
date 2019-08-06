@@ -13,8 +13,8 @@ fn read_stdin() -> Result<String, String> {
 fn main() -> Result<(), String> {
     let text = read_stdin()?;
     markdown::print_event_list(&text);
-    let first_pass = markdown::first_pass(&text)?;
-    println!("FIRST {:?}", first_pass.strings);
+    let ast = ast::parse_text(&text)?;
+    println!("AST: {:?}", ast.value);
     Ok(())
 }
 
@@ -45,48 +45,113 @@ mod markdown {
             println!("{:?}", event)
         }
     }
+}
 
-    // Single markdown file
-    struct MarkdownDocument {
-        /// All text segments, in order of appearance.
-        strings: Vec<String>,
-        /// All keywords.
-        keywords: Vec<String>,
+mod ast {
+    use pulldown_cmark::{CowStr, Event, Parser, Tag};
+    use std::borrow::Cow;
+    use std::collections::HashSet;
+
+    fn to_std_cow<'a>(s: CowStr<'a>) -> Cow<'a, str> {
+        match s {
+            CowStr::Borrowed(b) => Cow::Borrowed(b),
+            owned => Cow::Owned(owned.to_string()),
+        }
     }
 
-    pub struct FirstPassOutput {
-        pub strings: Vec<String>,
-        keywords: Vec<String>,
+    /// Root of a file
+    pub struct File<'a> {
+        name: String,
+        elements: Elements<'a>,
     }
 
-    // First pass : extract sentences, structure, keywords
-    pub fn first_pass(text: &str) -> Result<FirstPassOutput, String> {
-        let mut strings = Vec::new();
-        let mut keywords = Vec::new();
+    pub type Elements<'a> = Vec<Element<'a>>;
 
-        // Use peekable iterator to avoid accumulator ?
-        // Filter accumulated strings ?
+    /// Structural elements
+    #[derive(Debug)]
+    pub enum Element<'a> {
+        Paragraph(Vec<Cow<'a, str>>),
+        Section {
+            title: Cow<'a, str>,
+            elements: Elements<'a>,
+        },
+    }
 
-        let mut current_string = String::new();
-        for event in Parser::new(text) {
-            match event {
-                // Text elements can be split if they contain markers, regroup them
-                Event::Text(text) => current_string.push_str(&text),
-                Event::Start(_) | Event::End(_) => {
-                    let s = std::mem::replace(&mut current_string, String::new());
-                    strings.extend(s.split('.').map(|s| s.to_string()))
-                }
-                // Ignore breaks
-                Event::SoftBreak => (),
-                Event::HardBreak => (),
-                // Everything else is rejected for now
-                _ => return Err(format!("Event not supported: {:?}", event)),
+    pub struct KeywordsAnd<T> {
+        pub keywords: HashSet<String>,
+        pub value: T,
+    }
+
+    struct ParsingState<'a> {
+        iter: Parser<'a>,
+        keywords: HashSet<String>,
+    }
+    impl<'a> ParsingState<'a> {
+        fn new(text: &'a str) -> Self {
+            Self {
+                iter: Parser::new(text),
+                keywords: HashSet::new(),
             }
         }
 
-        Ok(FirstPassOutput { strings, keywords })
+        fn parse_structural_sequence(&mut self) -> Result<Elements<'a>, String> {
+            let mut v = Vec::new();
+            while let Some(structural) = self.try_parse_structural()? {
+                v.push(structural)
+            }
+            Ok(v)
+        }
+
+        fn try_parse_structural(&mut self) -> Result<Option<Element<'a>>, String> {
+            match self.iter.next() {
+                None => Ok(None),
+                Some(Event::Start(Tag::Paragraph)) => Ok(Some(self.parse_paragraph()?)),
+                Some(e) => Err(format!("Expected structural element: {:?}", e)),
+            }
+        }
+
+        fn parse_paragraph(&mut self) -> Result<Element<'a>, String> {
+            let mut finished_strings = Vec::new();
+            let mut current_string = None;
+            for event in &mut self.iter {
+                match event {
+                    Event::End(Tag::Paragraph) => {
+                        if let Some(s) = current_string {
+                            finished_strings.push(s);
+                            current_string = None
+                        }
+                        return Ok(Element::Paragraph(finished_strings));
+                    }
+                    Event::Text(s) => {
+                        current_string = match current_string {
+                            None => Some(to_std_cow(s)),
+                            Some(mut cow) => {
+                                cow.to_mut().push_str(&s);
+                                Some(cow)
+                            }
+                        };
+                    }
+                    Event::SoftBreak | Event::HardBreak => {
+                        if let Some(s) = current_string {
+                            finished_strings.push(s);
+                            current_string = None
+                        }
+                    }
+                    e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
+                }
+            }
+            Err("Unclosed paragraph".into())
+        }
     }
 
+    pub fn parse_text<'a>(text: &'a str) -> Result<KeywordsAnd<Elements<'a>>, String> {
+        let mut parsing_state = ParsingState::new(text);
+        let elements = parsing_state.parse_structural_sequence()?;
+        Ok(KeywordsAnd {
+            keywords: parsing_state.keywords,
+            value: elements,
+        })
+    }
 }
 
 /*struct OriginPosition {
