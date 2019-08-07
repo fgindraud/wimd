@@ -13,8 +13,8 @@ fn read_stdin() -> Result<String, String> {
 fn main() -> Result<(), String> {
     let text = read_stdin()?;
     markdown::print_event_list(&text);
-    let ast = ast::parse_text(&text)?;
-    println!("AST: {:?}", ast.value);
+    let (root, keywords) = ast::parse_text(&text)?;
+    println!("AST: {:?}", root);
     Ok(())
 }
 
@@ -52,40 +52,55 @@ mod ast {
     use std::borrow::Cow;
     use std::collections::HashSet;
 
+    /// Root of a file. A section with no real title.
+    #[derive(Debug)]
+    pub struct File<'a> {
+        /// Name, or None if stdin
+        name: Option<String>,
+        blocks: Vec<BlockElement<'a>>,
+        sections: Vec<Section<'a>>,
+    }
+
+    #[derive(Debug)]
+    pub enum BlockElement<'a> {
+        Paragraph(Vec<Cow<'a, str>>),
+        List,
+    }
+
+    #[derive(Debug)]
+    pub struct Section<'a> {
+        title: Cow<'a, str>,
+        blocks: Vec<BlockElement<'a>>,
+        sub_sections: Vec<Section<'a>>,
+    }
+
+    /// Closure-like struct to allow use of recursive functions for parsing
+    struct ParsingState<'a> {
+        iter: Parser<'a>,
+        keywords: HashSet<String>,
+    }
+
+    enum TryParseValue<T> {
+        /// No value due to end of event stream
+        NoEvent,
+        /// No value because a header outside our capabilities has appeared. Header start event consumed.
+        HeaderStart(i32),
+        Value(T),
+    }
+
     fn to_std_cow<'a>(s: CowStr<'a>) -> Cow<'a, str> {
         match s {
             CowStr::Borrowed(b) => Cow::Borrowed(b),
             owned => Cow::Owned(owned.to_string()),
         }
     }
-
-    /// Root of a file
-    pub struct File<'a> {
-        name: String,
-        elements: Elements<'a>,
+    fn accumulate_to_cow<'a>(acc: &mut Option<Cow<'a, str>>, s: CowStr<'a>) {
+        match acc {
+            None => *acc = Some(to_std_cow(s)),
+            Some(cow) => cow.to_mut().push_str(&s),
+        }
     }
 
-    pub type Elements<'a> = Vec<Element<'a>>;
-
-    /// Structural elements
-    #[derive(Debug)]
-    pub enum Element<'a> {
-        Paragraph(Vec<Cow<'a, str>>),
-        Section {
-            title: Cow<'a, str>,
-            elements: Elements<'a>,
-        },
-    }
-
-    pub struct KeywordsAnd<T> {
-        pub keywords: HashSet<String>,
-        pub value: T,
-    }
-
-    struct ParsingState<'a> {
-        iter: Parser<'a>,
-        keywords: HashSet<String>,
-    }
     impl<'a> ParsingState<'a> {
         fn new(text: &'a str) -> Self {
             Self {
@@ -94,63 +109,160 @@ mod ast {
             }
         }
 
-        fn parse_structural_sequence(&mut self) -> Result<Elements<'a>, String> {
-            let mut v = Vec::new();
-            while let Some(structural) = self.try_parse_structural()? {
-                v.push(structural)
-            }
-            Ok(v)
+        fn parse_file(
+            mut self,
+            filename: Option<String>,
+        ) -> Result<(File<'a>, HashSet<String>), String> {
+            let (blocks, sections, no_next_header) = self.parse_section_content_at_level(0)?;
+            assert_eq!(no_next_header, None);
+            Ok((
+                File {
+                    name: filename,
+                    blocks,
+                    sections,
+                },
+                self.keywords,
+            ))
         }
 
-        fn try_parse_structural(&mut self) -> Result<Option<Element<'a>>, String> {
+        /// Parse section (header + content) from start tag (already consumed) to end of section.
+        /// Return section and next header level if not end of events.
+        fn parse_section_of_level(
+            &mut self,
+            level: i32,
+        ) -> Result<(Section<'a>, Option<i32>), String> {
+            let title = {
+                let mut title_string = None;
+                loop {
+                    match self.iter.next() {
+                        None => return Err("Unclosed header title".into()),
+                        Some(Event::Text(s)) => accumulate_to_cow(&mut title_string, s),
+                        Some(Event::End(Tag::Header(n))) if n == level => match title_string {
+                            None => return Err("Empty header title".into()),
+                            Some(cow) => break cow,
+                        },
+                        Some(e) => {
+                            return Err(format!(
+                                "Expected header title for level {}: {:?}",
+                                level, e
+                            ))
+                        }
+                    }
+                }
+            };
+            let (blocks, sub_sections, next_header_level) =
+                self.parse_section_content_at_level(level)?;
+            Ok((
+                Section {
+                    title,
+                    blocks,
+                    sub_sections,
+                },
+                next_header_level,
+            ))
+        }
+
+        /// Parse contents of a section (recursively) : blocks, then sub sections until next lesser header level.
+        /// Assume the current header has just been processed.
+        /// Returns contents and next header level if any (start tag already parsed).
+        fn parse_section_content_at_level(
+            &mut self,
+            level: i32,
+        ) -> Result<(Vec<BlockElement<'a>>, Vec<Section<'a>>, Option<i32>), String> {
+            let mut blocks = Vec::new();
+            let mut sub_sections = Vec::new();
+            // Parse all blocks before first section
+            let mut next_header_start = loop {
+                match self.try_parse_block()? {
+                    TryParseValue::NoEvent => break None,
+                    TryParseValue::HeaderStart(level) => break Some(level),
+                    TryParseValue::Value(block) => blocks.push(block),
+                }
+            };
+            // Parse all sub sections
+            let after_section_header_start = loop {
+                match next_header_start.take() {
+                    None => break None,
+                    Some(next_header_level) => {
+                        assert!((1..=6).contains(&next_header_level));
+                        if next_header_level <= level {
+                            break Some(next_header_level);
+                        } else if next_header_level == level + 1 {
+                            let (sub_section, current_next_header) =
+                                self.parse_section_of_level(next_header_level)?;
+                            sub_sections.push(sub_section);
+                            next_header_start = current_next_header;
+                        } else {
+                            return Err(format!(
+                                "Header {} is too deep for current level {}",
+                                next_header_level, level
+                            ));
+                        }
+                    }
+                }
+            };
+            Ok((blocks, sub_sections, after_section_header_start))
+        }
+
+        /// Try to parse a block element
+        fn try_parse_block(&mut self) -> Result<TryParseValue<BlockElement<'a>>, String> {
             match self.iter.next() {
-                None => Ok(None),
-                Some(Event::Start(Tag::Paragraph)) => Ok(Some(self.parse_paragraph()?)),
-                Some(e) => Err(format!("Expected structural element: {:?}", e)),
+                None => Ok(TryParseValue::NoEvent),
+                Some(Event::Start(Tag::Header(level))) => Ok(TryParseValue::HeaderStart(level)),
+                Some(Event::Start(Tag::Paragraph)) => {
+                    Ok(TryParseValue::Value(self.parse_paragraph()?))
+                }
+                Some(Event::Start(Tag::List(ordered))) => {
+                    Ok(TryParseValue::Value(self.parse_list(ordered)?))
+                }
+                Some(e) => Err(format!("Expected block element: {:?}", e)),
             }
         }
 
-        fn parse_paragraph(&mut self) -> Result<Element<'a>, String> {
+        /// Parse paragraph from start tag (already consumed) to end tag (included)
+        fn parse_paragraph(&mut self) -> Result<BlockElement<'a>, String> {
             let mut finished_strings = Vec::new();
             let mut current_string = None;
             for event in &mut self.iter {
                 match event {
                     Event::End(Tag::Paragraph) => {
-                        if let Some(s) = current_string {
-                            finished_strings.push(s);
-                            current_string = None
+                        if let Some(s) = current_string.take() {
+                            finished_strings.push(s)
                         }
-                        return Ok(Element::Paragraph(finished_strings));
+                        return Ok(BlockElement::Paragraph(finished_strings));
                     }
-                    Event::Text(s) => {
-                        current_string = match current_string {
-                            None => Some(to_std_cow(s)),
-                            Some(mut cow) => {
-                                cow.to_mut().push_str(&s);
-                                Some(cow)
-                            }
-                        };
-                    }
+                    Event::Text(s) => accumulate_to_cow(&mut current_string, s),
                     Event::SoftBreak | Event::HardBreak => {
-                        if let Some(s) = current_string {
-                            finished_strings.push(s);
-                            current_string = None
+                        if let Some(s) = current_string.take() {
+                            finished_strings.push(s)
                         }
+                    }
+                    Event::Start(Tag::Emphasis) | Event::End(Tag::Emphasis) => {
+                        // TODO handle emphasis
+                    }
+                    Event::Start(Tag::Strong) | Event::End(Tag::Strong) => {
+                        // TODO handle Strong
                     }
                     e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
                 }
             }
             Err("Unclosed paragraph".into())
         }
+
+        fn parse_list(&mut self, ordered: Option<usize>) -> Result<BlockElement<'a>, String> {
+            //TODO handle lists
+            for event in &mut self.iter {
+                match event {
+                    Event::End(Tag::List(_)) => return Ok(BlockElement::List),
+                    _ => ()
+                }
+            }
+            Err("Unclosed list".into())
+        }
     }
 
-    pub fn parse_text<'a>(text: &'a str) -> Result<KeywordsAnd<Elements<'a>>, String> {
-        let mut parsing_state = ParsingState::new(text);
-        let elements = parsing_state.parse_structural_sequence()?;
-        Ok(KeywordsAnd {
-            keywords: parsing_state.keywords,
-            value: elements,
-        })
+    pub fn parse_text<'a>(text: &'a str) -> Result<(File<'a>, HashSet<String>), String> {
+        ParsingState::new(text).parse_file(None)
     }
 }
 
