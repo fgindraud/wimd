@@ -84,13 +84,7 @@ mod ast {
 
     /// Return type for events consumed by not processed by a parsing function.
     /// Returned by functions that require an unexpected event to stop parsing (inline, section).
-    #[derive(Debug, PartialEq)]
-    enum Consumed<'a> {
-        /// No more events
-        NoEvent,
-        /// Could not process consumed event locally, return it for callers
-        Unprocessed(Event<'a>),
-    }
+    type Consumed<'a> = Option<Event<'a>>;
 
     impl<'a> ParsingState<'a> {
         fn new(text: &'a str) -> Self {
@@ -101,10 +95,10 @@ mod ast {
         }
 
         fn parse_document(mut self) -> Result<(Document<'a>, HashSet<String>), String> {
-            let (blocks, sections, next_element) = self.parse_section_content_at_level(0)?;
-            match next_element {
-                Consumed::NoEvent => Ok((Document { blocks, sections }, self.keywords)),
-                Consumed::Unprocessed(e) => Err(format!("Unexpected element: {:?}", e)),
+            let (blocks, sections, next) = self.parse_section_content_at_level(0)?;
+            match next {
+                None => Ok((Document { blocks, sections }, self.keywords)),
+                Some(e) => Err(format!("Unexpected element: {:?}", e)),
             }
         }
 
@@ -114,18 +108,18 @@ mod ast {
             level: i32,
         ) -> Result<(Section<'a>, Consumed<'a>), String> {
             let title = match self.parse_inline() {
-                (Some(string), Consumed::Unprocessed(Event::End(Tag::Header(n)))) => {
+                (Some(string), Some(Event::End(Tag::Header(n)))) => {
                     assert_eq!(n, level);
                     string
                 }
-                (None, _) => panic!("Header without title"),
-                (_, Consumed::NoEvent) => panic!("Unclosed header"),
-                (_, Consumed::Unprocessed(e)) => {
+                (_, Some(e)) => {
                     return Err(format!(
                         "Expected header title for level {}: {:?}",
                         level, e
                     ))
                 }
+                (None, _) => panic!("Header without title"),
+                (_, None) => panic!("Unclosed header"),
             };
             let (blocks, sub_sections, next) = self.parse_section_content_at_level(level)?;
             Ok((
@@ -155,27 +149,22 @@ mod ast {
                 }
             };
             // Parse all sub sections
-            loop {
-                match &mut next {
-                    Consumed::Unprocessed(Event::Start(Tag::Header(new_level))) => {
-                        let new_level = *new_level; // End mut reference to next
-                        assert!((1..=6).contains(&new_level));
-                        if new_level <= level {
-                            // End current section, let caller handle this
-                            break;
-                        } else if new_level == level + 1 {
-                            // Sub section, parse and update next
-                            let (sub_section, new_next) = self.parse_section_of_level(new_level)?;
-                            sub_sections.push(sub_section);
-                            next = new_next
-                        } else {
-                            return Err(format!(
-                                "Header {} is too deep for current level {}",
-                                new_level, level
-                            ));
-                        }
-                    }
-                    _ => break,
+            while let Some(Event::Start(Tag::Header(new_level))) = &mut next {
+                let new_level = *new_level; // End mut reference to next
+                assert!((1..=6).contains(&new_level));
+                if new_level <= level {
+                    // End current section, let caller handle this
+                    break;
+                } else if new_level == level + 1 {
+                    // Sub section, parse and update next
+                    let (sub_section, new_next) = self.parse_section_of_level(new_level)?;
+                    sub_sections.push(sub_section);
+                    next = new_next
+                } else {
+                    return Err(format!(
+                        "Header {} is too deep for current level {}",
+                        new_level, level
+                    ));
                 }
             }
             Ok((blocks, sub_sections, next))
@@ -184,12 +173,9 @@ mod ast {
         /// Try to parse a block element
         fn try_parse_block(&mut self) -> Result<Result<BlockElement<'a>, Consumed<'a>>, String> {
             Ok(match self.iter.next() {
-                None => Err(Consumed::NoEvent),
-                Some(event) => match event {
-                    Event::Start(Tag::Paragraph) => Ok(self.parse_paragraph()?),
-                    Event::Start(Tag::List(ordered)) => Ok(self.parse_list(ordered)?),
-                    e => Err(Consumed::Unprocessed(e)),
-                },
+                Some(Event::Start(Tag::Paragraph)) => Ok(self.parse_paragraph()?),
+                Some(Event::Start(Tag::List(ordered))) => Ok(self.parse_list(ordered)?),
+                next => Err(next),
             })
         }
 
@@ -199,16 +185,14 @@ mod ast {
             loop {
                 let (inline_str, next) = self.parse_inline();
                 finished_strings.push(inline_str.expect("Empty inline string"));
-                match next {
-                    Consumed::NoEvent => panic!("Unclosed paragraph"),
-                    Consumed::Unprocessed(event) => match event {
-                        Event::End(Tag::Paragraph) => {
-                            assert!(finished_strings.len() > 0);
-                            return Ok(BlockElement::Paragraph(finished_strings));
-                        }
-                        Event::SoftBreak | Event::HardBreak => (),
-                        e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
-                    },
+                let next_event = next.expect("Unclosed paragraph");
+                match next_event {
+                    Event::End(Tag::Paragraph) => {
+                        assert!(finished_strings.len() > 0);
+                        return Ok(BlockElement::Paragraph(finished_strings));
+                    }
+                    Event::SoftBreak | Event::HardBreak => (),
+                    e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
                 }
             }
         }
@@ -268,8 +252,7 @@ mod ast {
                         let end = string.len();
                         strong_parts.push(start..end);
                     }
-                    None => break Consumed::NoEvent,
-                    Some(e) => break Consumed::Unprocessed(e),
+                    next => break next,
                 }
             };
             let inline_str = string.map(|string| InlineStr {
