@@ -57,20 +57,28 @@ mod ast {
 
     #[derive(Debug)]
     pub enum BlockElement<'a> {
-        Paragraph(Vec<InlineStr<'a>>),
+        Paragraph(Vec<InlineElement<'a>>),
         Rule,
-        List,
+        List(List<'a>),
     }
 
     #[derive(Debug)]
+    pub struct List<'a> {
+        ordered: bool,
+        items: Vec<InlineElement<'a>>,
+    }
+
+    //TODO Listitem{ inline, sub_list: Option<List> }
+
+    #[derive(Debug)]
     pub struct Section<'a> {
-        title: InlineStr<'a>,
+        title: InlineElement<'a>,
         blocks: Vec<BlockElement<'a>>,
         sub_sections: Vec<Section<'a>>,
     }
 
     #[derive(Debug)]
-    pub struct InlineStr<'a> {
+    pub struct InlineElement<'a> {
         /// Raw string content without any formatting
         string: Cow<'a, str>,
         /// List of ranges where a strong marker applies (in order, no overlap)
@@ -176,7 +184,9 @@ mod ast {
             Ok(match self.iter.next() {
                 Some(Event::Start(Tag::Paragraph)) => Ok(self.parse_paragraph()?),
                 Some(Event::Start(Tag::Rule)) => Ok(self.parse_rule()),
-                Some(Event::Start(Tag::List(ordered))) => Ok(self.parse_list(ordered)?),
+                Some(Event::Start(Tag::List(start_i))) => {
+                    Ok(BlockElement::List(self.parse_list(start_i.is_some())?))
+                }
                 next => Err(next),
             })
         }
@@ -204,24 +214,36 @@ mod ast {
             let event = self.iter.next().expect("Unclosed rule");
             match event {
                 Event::End(Tag::Rule) => BlockElement::Rule,
-                e => panic!("Expected rule events: {:?}", e)
+                e => panic!("Expected rule events: {:?}", e),
             }
         }
 
-        fn parse_list(&mut self, ordered: Option<usize>) -> Result<BlockElement<'a>, String> {
-            //TODO handle lists
-            for event in &mut self.iter {
-                match event {
-                    Event::End(Tag::List(_)) => return Ok(BlockElement::List),
-                    _ => (),
+        /// Parse list from start tag (already consumed) to end tag (included)
+        fn parse_list(&mut self, ordered: bool) -> Result<List<'a>, String> {
+            let mut items: Vec<InlineElement<'a>> = Vec::new();
+            loop {
+                match self.iter.next().expect("Unclosed list") {
+                    Event::Start(Tag::Item) => items.push(self.parse_list_item()?),
+                    Event::End(Tag::List(_)) => return Ok(List { ordered, items }),
+                    e => panic!("Expected list items: {:?}", e),
                 }
             }
-            Err("Unclosed list".into())
+        }
+        fn parse_list_item(&mut self) -> Result<InlineElement<'a>, String> {
+            let (inline_str, next) = self.parse_inline();
+            let inline_str = inline_str.expect("Empty inline string");
+            let next_event = next.expect("Unclosed list item");
+            match next_event {
+                Event::End(Tag::Item) => Ok(inline_str),
+                Event::Start(Tag::List(_)) => unimplemented!(),
+                e => panic!("Expected list items: {:?}", e),
+            }
+            // FIXME loop allowing breaks
         }
 
         /// Parse one inline text unit (with emphasis / strong).
         /// Returns no error, and will panic in case of structural errors slipping past the markdown parser.
-        fn parse_inline(&mut self) -> (Option<InlineStr<'a>>, Consumed<'a>) {
+        fn parse_inline(&mut self) -> (Option<InlineElement<'a>>, Consumed<'a>) {
             let opt_cow_len = |s: &Option<Cow<'a, str>>| s.as_ref().map_or(0, |s| s.len());
             // local state
             let mut string: Option<Cow<'a, str>> = None;
@@ -266,7 +288,7 @@ mod ast {
                     next => break next,
                 }
             };
-            let inline_str = string.map(|string| InlineStr {
+            let inline_str = string.map(|string| InlineElement {
                 string,
                 strong_parts,
             });

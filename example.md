@@ -21,5 +21,6 @@ sur plusieurs lignes
 Une liste avec entête :
 1. ligne 1
 2. ligne 2
+	- sublist
 
 ### *mot clé* dans un titre ###
