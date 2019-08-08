@@ -3,6 +3,8 @@
 *Wimd* est un outil pour générer un *wiki* depuis un fichier *markdown* contenant des notes.
 Wimd est écrit en *Rust*. Il utilise *pulldown_cmark* pour le parsing markdown.
 
+--------------------------------------
+
 ## License ##
 Wimd n'a pas encore de license ; cela viendra plus tard.
 

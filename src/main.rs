@@ -58,6 +58,7 @@ mod ast {
     #[derive(Debug)]
     pub enum BlockElement<'a> {
         Paragraph(Vec<InlineStr<'a>>),
+        Rule,
         List,
     }
 
@@ -174,6 +175,7 @@ mod ast {
         fn try_parse_block(&mut self) -> Result<Result<BlockElement<'a>, Consumed<'a>>, String> {
             Ok(match self.iter.next() {
                 Some(Event::Start(Tag::Paragraph)) => Ok(self.parse_paragraph()?),
+                Some(Event::Start(Tag::Rule)) => Ok(self.parse_rule()),
                 Some(Event::Start(Tag::List(ordered))) => Ok(self.parse_list(ordered)?),
                 next => Err(next),
             })
@@ -194,6 +196,15 @@ mod ast {
                     Event::SoftBreak | Event::HardBreak => (),
                     e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
                 }
+            }
+        }
+
+        /// Parse paragraph from start tag (already consumed) to end tag (included)
+        fn parse_rule(&mut self) -> BlockElement<'a> {
+            let event = self.iter.next().expect("Unclosed rule");
+            match event {
+                Event::End(Tag::Rule) => BlockElement::Rule,
+                e => panic!("Expected rule events: {:?}", e)
             }
         }
 
