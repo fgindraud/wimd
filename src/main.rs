@@ -13,7 +13,7 @@ fn read_stdin() -> Result<String, String> {
 fn main() -> Result<(), String> {
     let text = read_stdin()?;
     markdown::print_event_list(&text);
-    let (root, keywords) = ast::parse_text(&text)?;
+    let (root, keywords) = ast::parse(&text)?;
     println!("AST: {:?}", root);
     Ok(())
 }
@@ -38,7 +38,7 @@ fn main() -> Result<(), String> {
 // - by keyword, list of sentences organised by heading position
 
 mod markdown {
-    use pulldown_cmark::{Event, Parser};
+    use pulldown_cmark::Parser;
 
     pub fn print_event_list(text: &str) {
         for event in Parser::new(&text) {
@@ -51,12 +51,11 @@ mod ast {
     use pulldown_cmark::{CowStr, Event, Parser, Tag};
     use std::borrow::Cow;
     use std::collections::HashSet;
+    use std::ops::Range;
 
-    /// Root of a file. A section with no real title.
+    /// Root of a markdown document. Equivalent to a level-0 section with no title.
     #[derive(Debug)]
-    pub struct File<'a> {
-        /// Name, or None if stdin
-        name: Option<String>,
+    pub struct Document<'a> {
         blocks: Vec<BlockElement<'a>>,
         sections: Vec<Section<'a>>,
     }
@@ -74,6 +73,14 @@ mod ast {
         sub_sections: Vec<Section<'a>>,
     }
 
+    #[derive(Debug)]
+    pub struct InlineStr<'a> {
+        /// Raw string content without any formatting
+        string: Cow<'a, str>,
+        /// List of ranges where a strong marker applies (in order, no overlap)
+        strong_parts: Vec<Range<usize>>,
+    }
+
     /// Closure-like struct to allow use of recursive functions for parsing
     struct ParsingState<'a> {
         iter: Parser<'a>,
@@ -86,6 +93,15 @@ mod ast {
         /// No value because a header outside our capabilities has appeared. Header start event consumed.
         HeaderStart(i32),
         Value(T),
+    }
+
+    /// Return type for events consumed by not processed by a parsing function.
+    /// Returned by functions that require an unexpected event to stop parsing (inline, section).
+    enum Consumed<'a> {
+        /// No more events
+        NoEvent,
+        /// Could not process consumed event locally, return it for callers
+        Unprocessed(Event<'a>),
     }
 
     fn to_std_cow<'a>(s: CowStr<'a>) -> Cow<'a, str> {
@@ -109,20 +125,10 @@ mod ast {
             }
         }
 
-        fn parse_file(
-            mut self,
-            filename: Option<String>,
-        ) -> Result<(File<'a>, HashSet<String>), String> {
+        fn parse_document(mut self) -> Result<(Document<'a>, HashSet<String>), String> {
             let (blocks, sections, no_next_header) = self.parse_section_content_at_level(0)?;
             assert_eq!(no_next_header, None);
-            Ok((
-                File {
-                    name: filename,
-                    blocks,
-                    sections,
-                },
-                self.keywords,
-            ))
+            Ok((Document { blocks, sections }, self.keywords))
         }
 
         /// Parse section (header + content) from start tag (already consumed) to end of section.
@@ -241,7 +247,7 @@ mod ast {
                         // TODO handle emphasis
                     }
                     Event::Start(Tag::Strong) | Event::End(Tag::Strong) => {
-                        // TODO handle Strong
+                        // TODO handle Strong. Ignored for now
                     }
                     e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
                 }
@@ -254,15 +260,61 @@ mod ast {
             for event in &mut self.iter {
                 match event {
                     Event::End(Tag::List(_)) => return Ok(BlockElement::List),
-                    _ => ()
+                    _ => (),
                 }
             }
             Err("Unclosed list".into())
         }
+
+        /// Parse one inline text unit (with emphasis / strong).
+        /// Returns no error, and will panic in case of structural errors slipping past the markdown parser.
+        fn parse_inline(&mut self) -> (Option<InlineStr<'a>>, Consumed<'a>) {
+            let opt_cow_len = |s: &Option<Cow<'a, str>>| s.as_ref().map_or(0, |s| s.len());
+            // local state
+            let mut string = None;
+            let mut strong_parts = Vec::new();
+            let mut strong_start = None;
+            let mut emphasis_start = None;
+            // Parse all inline elements
+            let next = loop {
+                match self.iter.next() {
+                    None => break Consumed::NoEvent,
+                    Some(Event::Text(s)) => accumulate_to_cow(&mut string, s),
+                    // Emphasis
+                    Some(Event::Start(Tag::Emphasis)) => {
+                        assert_eq!(emphasis_start, None);
+                        emphasis_start = Some(opt_cow_len(&string))
+                    }
+                    Some(Event::End(Tag::Emphasis)) => {
+                        let start = emphasis_start.take().expect("Not in emphasis block");
+                        let string = string.as_ref().expect("Empty emphasis block");
+                        let end = string.len();
+                        self.keywords.insert(string[start..end].to_string());
+                    }
+                    // Strong
+                    Some(Event::Start(Tag::Strong)) => {
+                        assert_eq!(strong_start, None);
+                        strong_start = Some(opt_cow_len(&string))
+                    }
+                    Some(Event::End(Tag::Strong)) => {
+                        let start = strong_start.take().expect("Not in strong block");
+                        let string = string.as_ref().expect("Empty strong block");
+                        let end = string.len();
+                        strong_parts.push(start..end);
+                    }
+                    Some(e) => break Consumed::Unprocessed(e),
+                }
+            };
+            let inline_str = string.map(|string| InlineStr {
+                string,
+                strong_parts,
+            });
+            (inline_str, next)
+        }
     }
 
-    pub fn parse_text<'a>(text: &'a str) -> Result<(File<'a>, HashSet<String>), String> {
-        ParsingState::new(text).parse_file(None)
+    pub fn parse<'a>(text: &'a str) -> Result<(Document<'a>, HashSet<String>), String> {
+        ParsingState::new(text).parse_document()
     }
 }
 
