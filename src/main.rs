@@ -82,14 +82,6 @@ mod ast {
         keywords: HashSet<String>,
     }
 
-    enum TryParseValue<T> {
-        /// No value due to end of event stream
-        NoEvent,
-        /// No value because a header outside our capabilities has appeared. Header start event consumed.
-        HeaderStart(i32),
-        Value(T),
-    }
-
     /// Return type for events consumed by not processed by a parsing function.
     /// Returned by functions that require an unexpected event to stop parsing (inline, section).
     #[derive(Debug, PartialEq)]
@@ -98,19 +90,6 @@ mod ast {
         NoEvent,
         /// Could not process consumed event locally, return it for callers
         Unprocessed(Event<'a>),
-    }
-
-    fn to_std_cow<'a>(s: CowStr<'a>) -> Cow<'a, str> {
-        match s {
-            CowStr::Borrowed(b) => Cow::Borrowed(b),
-            owned => Cow::Owned(owned.to_string()),
-        }
-    }
-    fn accumulate_to_cow<'a>(acc: &mut Option<Cow<'a, str>>, s: CowStr<'a>) {
-        match acc {
-            None => *acc = Some(to_std_cow(s)),
-            Some(cow) => cow.to_mut().push_str(&s),
-        }
     }
 
     impl<'a> ParsingState<'a> {
@@ -122,17 +101,18 @@ mod ast {
         }
 
         fn parse_document(mut self) -> Result<(Document<'a>, HashSet<String>), String> {
-            let (blocks, sections, end) = self.parse_section_content_at_level(0)?;
-            assert_eq!(end, None);
-            Ok((Document { blocks, sections }, self.keywords))
+            let (blocks, sections, next_element) = self.parse_section_content_at_level(0)?;
+            match next_element {
+                Consumed::NoEvent => Ok((Document { blocks, sections }, self.keywords)),
+                Consumed::Unprocessed(e) => Err(format!("Unexpected element: {:?}", e)),
+            }
         }
 
         /// Parse section (header + content) from start tag (already consumed) to end of section.
-        /// Return section and next header level if not end of events.
         fn parse_section_of_level(
             &mut self,
             level: i32,
-        ) -> Result<(Section<'a>, Option<i32>), String> {
+        ) -> Result<(Section<'a>, Consumed<'a>), String> {
             let title = match self.parse_inline() {
                 (Some(string), Consumed::Unprocessed(Event::End(Tag::Header(n)))) => {
                     assert_eq!(n, level);
@@ -147,8 +127,7 @@ mod ast {
                     ))
                 }
             };
-            let (blocks, sub_sections, next) =
-                self.parse_section_content_at_level(level)?;
+            let (blocks, sub_sections, next) = self.parse_section_content_at_level(level)?;
             Ok((
                 Section {
                     title,
@@ -161,59 +140,57 @@ mod ast {
 
         /// Parse contents of a section (recursively) : blocks, then sub sections until next lesser header level.
         /// Assume the current header has just been processed.
-        /// Returns contents and next header level if any (start tag already parsed).
         fn parse_section_content_at_level(
             &mut self,
             level: i32,
-        ) -> Result<(Vec<BlockElement<'a>>, Vec<Section<'a>>, Option<i32>), String> {
+        ) -> Result<(Vec<BlockElement<'a>>, Vec<Section<'a>>, Consumed<'a>), String> {
+            // Local state
             let mut blocks = Vec::new();
             let mut sub_sections = Vec::new();
             // Parse all blocks before first section
-            let mut next_header_start = loop {
+            let mut next = loop {
                 match self.try_parse_block()? {
-                    TryParseValue::NoEvent => break None,
-                    TryParseValue::HeaderStart(level) => break Some(level),
-                    TryParseValue::Value(block) => blocks.push(block),
+                    Ok(block) => blocks.push(block),
+                    Err(next) => break next,
                 }
             };
             // Parse all sub sections
-            let after_section_header_start = loop {
-                match next_header_start.take() {
-                    None => break None,
-                    Some(next_header_level) => {
-                        assert!((1..=6).contains(&next_header_level));
-                        if next_header_level <= level {
-                            break Some(next_header_level);
-                        } else if next_header_level == level + 1 {
-                            let (sub_section, current_next_header) =
-                                self.parse_section_of_level(next_header_level)?;
+            loop {
+                match &mut next {
+                    Consumed::Unprocessed(Event::Start(Tag::Header(new_level))) => {
+                        let new_level = *new_level; // End mut reference to next
+                        assert!((1..=6).contains(&new_level));
+                        if new_level <= level {
+                            // End current section, let caller handle this
+                            break;
+                        } else if new_level == level + 1 {
+                            // Sub section, parse and update next
+                            let (sub_section, new_next) = self.parse_section_of_level(new_level)?;
                             sub_sections.push(sub_section);
-                            next_header_start = current_next_header;
+                            next = new_next
                         } else {
                             return Err(format!(
                                 "Header {} is too deep for current level {}",
-                                next_header_level, level
+                                new_level, level
                             ));
                         }
                     }
+                    _ => break,
                 }
-            };
-            Ok((blocks, sub_sections, after_section_header_start))
+            }
+            Ok((blocks, sub_sections, next))
         }
 
         /// Try to parse a block element
-        fn try_parse_block(&mut self) -> Result<TryParseValue<BlockElement<'a>>, String> {
-            match self.iter.next() {
-                None => Ok(TryParseValue::NoEvent),
-                Some(Event::Start(Tag::Header(level))) => Ok(TryParseValue::HeaderStart(level)),
-                Some(Event::Start(Tag::Paragraph)) => {
-                    Ok(TryParseValue::Value(self.parse_paragraph()?))
-                }
-                Some(Event::Start(Tag::List(ordered))) => {
-                    Ok(TryParseValue::Value(self.parse_list(ordered)?))
-                }
-                Some(e) => Err(format!("Expected block element: {:?}", e)),
-            }
+        fn try_parse_block(&mut self) -> Result<Result<BlockElement<'a>, Consumed<'a>>, String> {
+            Ok(match self.iter.next() {
+                None => Err(Consumed::NoEvent),
+                Some(event) => match event {
+                    Event::Start(Tag::Paragraph) => Ok(self.parse_paragraph()?),
+                    Event::Start(Tag::List(ordered)) => Ok(self.parse_list(ordered)?),
+                    e => Err(Consumed::Unprocessed(e)),
+                },
+            })
         }
 
         /// Parse paragraph from start tag (already consumed) to end tag (included)
@@ -221,9 +198,7 @@ mod ast {
             let mut finished_strings = Vec::new();
             loop {
                 let (inline_str, next) = self.parse_inline();
-                if let Some(inline_str) = inline_str {
-                    finished_strings.push(inline_str)
-                }
+                finished_strings.push(inline_str.expect("Empty inline string"));
                 match next {
                     Consumed::NoEvent => panic!("Unclosed paragraph"),
                     Consumed::Unprocessed(event) => match event {
@@ -254,15 +229,23 @@ mod ast {
         fn parse_inline(&mut self) -> (Option<InlineStr<'a>>, Consumed<'a>) {
             let opt_cow_len = |s: &Option<Cow<'a, str>>| s.as_ref().map_or(0, |s| s.len());
             // local state
-            let mut string = None;
-            let mut strong_parts = Vec::new();
-            let mut strong_start = None;
-            let mut emphasis_start = None;
+            let mut string: Option<Cow<'a, str>> = None;
+            let mut strong_parts: Vec<Range<usize>> = Vec::new();
+            let mut strong_start: Option<usize> = None;
+            let mut emphasis_start: Option<usize> = None;
             // Parse all inline elements
             let next = loop {
                 match self.iter.next() {
-                    None => break Consumed::NoEvent,
-                    Some(Event::Text(s)) => accumulate_to_cow(&mut string, s),
+                    Some(Event::Text(s)) => match &mut string {
+                        None => {
+                            let std_cow = match s {
+                                CowStr::Borrowed(b) => Cow::Borrowed(b),
+                                owned => Cow::Owned(owned.to_string()),
+                            };
+                            string = Some(std_cow)
+                        }
+                        Some(cow) => cow.to_mut().push_str(&s),
+                    },
                     // Emphasis
                     Some(Event::Start(Tag::Emphasis)) => {
                         assert_eq!(emphasis_start, None);
@@ -285,6 +268,7 @@ mod ast {
                         let end = string.len();
                         strong_parts.push(start..end);
                     }
+                    None => break Consumed::NoEvent,
                     Some(e) => break Consumed::Unprocessed(e),
                 }
             };
