@@ -12,9 +12,14 @@ fn read_stdin() -> Result<String, String> {
 
 fn main() -> Result<(), String> {
     let text = read_stdin()?;
-    markdown::print_event_list(&text);
+    // Test print token stream
+    for event in pulldown_cmark::Parser::new(&text) {
+        println!("{:?}", event)
+    }
+    // Ast test
     let (root, keywords) = ast::parse(&text)?;
     println!("AST: {:?}", root);
+    println!("KWDS: {:?}", keywords);
     Ok(())
 }
 
@@ -37,16 +42,6 @@ fn main() -> Result<(), String> {
 // - show data in order of .md file (headings, etc). links for keywords
 // - by keyword, list of sentences organised by heading position
 
-mod markdown {
-    use pulldown_cmark::Parser;
-
-    pub fn print_event_list(text: &str) {
-        for event in Parser::new(&text) {
-            println!("{:?}", event)
-        }
-    }
-}
-
 mod ast {
     use pulldown_cmark::{CowStr, Event, Parser, Tag};
     use std::borrow::Cow;
@@ -62,13 +57,13 @@ mod ast {
 
     #[derive(Debug)]
     pub enum BlockElement<'a> {
-        Paragraph(Vec<Cow<'a, str>>),
+        Paragraph(Vec<InlineStr<'a>>),
         List,
     }
 
     #[derive(Debug)]
     pub struct Section<'a> {
-        title: Cow<'a, str>,
+        title: InlineStr<'a>,
         blocks: Vec<BlockElement<'a>>,
         sub_sections: Vec<Section<'a>>,
     }
@@ -97,6 +92,7 @@ mod ast {
 
     /// Return type for events consumed by not processed by a parsing function.
     /// Returned by functions that require an unexpected event to stop parsing (inline, section).
+    #[derive(Debug, PartialEq)]
     enum Consumed<'a> {
         /// No more events
         NoEvent,
@@ -126,8 +122,8 @@ mod ast {
         }
 
         fn parse_document(mut self) -> Result<(Document<'a>, HashSet<String>), String> {
-            let (blocks, sections, no_next_header) = self.parse_section_content_at_level(0)?;
-            assert_eq!(no_next_header, None);
+            let (blocks, sections, end) = self.parse_section_content_at_level(0)?;
+            assert_eq!(end, None);
             Ok((Document { blocks, sections }, self.keywords))
         }
 
@@ -137,26 +133,21 @@ mod ast {
             &mut self,
             level: i32,
         ) -> Result<(Section<'a>, Option<i32>), String> {
-            let title = {
-                let mut title_string = None;
-                loop {
-                    match self.iter.next() {
-                        None => return Err("Unclosed header title".into()),
-                        Some(Event::Text(s)) => accumulate_to_cow(&mut title_string, s),
-                        Some(Event::End(Tag::Header(n))) if n == level => match title_string {
-                            None => return Err("Empty header title".into()),
-                            Some(cow) => break cow,
-                        },
-                        Some(e) => {
-                            return Err(format!(
-                                "Expected header title for level {}: {:?}",
-                                level, e
-                            ))
-                        }
-                    }
+            let title = match self.parse_inline() {
+                (Some(string), Consumed::Unprocessed(Event::End(Tag::Header(n)))) => {
+                    assert_eq!(n, level);
+                    string
+                }
+                (None, _) => panic!("Header without title"),
+                (_, Consumed::NoEvent) => panic!("Unclosed header"),
+                (_, Consumed::Unprocessed(e)) => {
+                    return Err(format!(
+                        "Expected header title for level {}: {:?}",
+                        level, e
+                    ))
                 }
             };
-            let (blocks, sub_sections, next_header_level) =
+            let (blocks, sub_sections, next) =
                 self.parse_section_content_at_level(level)?;
             Ok((
                 Section {
@@ -164,7 +155,7 @@ mod ast {
                     blocks,
                     sub_sections,
                 },
-                next_header_level,
+                next,
             ))
         }
 
@@ -228,31 +219,23 @@ mod ast {
         /// Parse paragraph from start tag (already consumed) to end tag (included)
         fn parse_paragraph(&mut self) -> Result<BlockElement<'a>, String> {
             let mut finished_strings = Vec::new();
-            let mut current_string = None;
-            for event in &mut self.iter {
-                match event {
-                    Event::End(Tag::Paragraph) => {
-                        if let Some(s) = current_string.take() {
-                            finished_strings.push(s)
+            loop {
+                let (inline_str, next) = self.parse_inline();
+                if let Some(inline_str) = inline_str {
+                    finished_strings.push(inline_str)
+                }
+                match next {
+                    Consumed::NoEvent => panic!("Unclosed paragraph"),
+                    Consumed::Unprocessed(event) => match event {
+                        Event::End(Tag::Paragraph) => {
+                            assert!(finished_strings.len() > 0);
+                            return Ok(BlockElement::Paragraph(finished_strings));
                         }
-                        return Ok(BlockElement::Paragraph(finished_strings));
-                    }
-                    Event::Text(s) => accumulate_to_cow(&mut current_string, s),
-                    Event::SoftBreak | Event::HardBreak => {
-                        if let Some(s) = current_string.take() {
-                            finished_strings.push(s)
-                        }
-                    }
-                    Event::Start(Tag::Emphasis) | Event::End(Tag::Emphasis) => {
-                        // TODO handle emphasis
-                    }
-                    Event::Start(Tag::Strong) | Event::End(Tag::Strong) => {
-                        // TODO handle Strong. Ignored for now
-                    }
-                    e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
+                        Event::SoftBreak | Event::HardBreak => (),
+                        e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
+                    },
                 }
             }
-            Err("Unclosed paragraph".into())
         }
 
         fn parse_list(&mut self, ordered: Option<usize>) -> Result<BlockElement<'a>, String> {
