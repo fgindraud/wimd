@@ -15,8 +15,9 @@ Les deux sont combinables avec le ***gras italique***.
 
 - premier élément
 - deuxième élément
-- troisième élément,
-sur plusieurs lignes
+- troisième élément
+	sur plusieurs lignes,
+	et encore et encore...
 
 Une liste avec entête :
 1. ligne 1

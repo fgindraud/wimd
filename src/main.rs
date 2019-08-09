@@ -65,10 +65,15 @@ mod ast {
     #[derive(Debug)]
     pub struct List<'a> {
         ordered: bool,
-        items: Vec<InlineElement<'a>>,
+        items: Vec<ListItem<'a>>,
     }
 
-    //TODO Listitem{ inline, sub_list: Option<List> }
+    #[derive(Debug)]
+    pub struct ListItem<'a> {
+        /// Possibly multiline text. Must be non empty.
+        text_content: Vec<InlineElement<'a>>,
+        sub_list: Option<List<'a>>,
+    }
 
     #[derive(Debug)]
     pub struct Section<'a> {
@@ -182,8 +187,16 @@ mod ast {
         /// Try to parse a block element
         fn try_parse_block(&mut self) -> Result<Result<BlockElement<'a>, Consumed<'a>>, String> {
             Ok(match self.iter.next() {
-                Some(Event::Start(Tag::Paragraph)) => Ok(self.parse_paragraph()?),
-                Some(Event::Start(Tag::Rule)) => Ok(self.parse_rule()),
+                Some(Event::Start(Tag::Paragraph)) => {
+                    Ok(BlockElement::Paragraph(self.parse_paragraph()?))
+                }
+                Some(Event::Start(Tag::Rule)) => {
+                    let event = self.iter.next().expect("Unclosed rule");
+                    match event {
+                        Event::End(Tag::Rule) => Ok(BlockElement::Rule),
+                        e => panic!("Expected rule end: {:?}", e),
+                    }
+                }
                 Some(Event::Start(Tag::List(start_i))) => {
                     Ok(BlockElement::List(self.parse_list(start_i.is_some())?))
                 }
@@ -192,35 +205,21 @@ mod ast {
         }
 
         /// Parse paragraph from start tag (already consumed) to end tag (included)
-        fn parse_paragraph(&mut self) -> Result<BlockElement<'a>, String> {
-            let mut finished_strings = Vec::new();
-            loop {
-                let (inline_str, next) = self.parse_inline();
-                finished_strings.push(inline_str.expect("Empty inline string"));
-                let next_event = next.expect("Unclosed paragraph");
-                match next_event {
-                    Event::End(Tag::Paragraph) => {
-                        assert!(finished_strings.len() > 0);
-                        return Ok(BlockElement::Paragraph(finished_strings));
-                    }
-                    Event::SoftBreak | Event::HardBreak => (),
-                    e => return Err(format!("Parsing paragraph: unexpected {:?}", e)),
+        fn parse_paragraph(&mut self) -> Result<Vec<InlineElement<'a>>, String> {
+            let (inline_sequence, next) = self.parse_inline_sequence();
+            let next_event = next.expect("Unclosed paragraph");
+            match next_event {
+                Event::End(Tag::Paragraph) => {
+                    assert!(inline_sequence.len() > 0);
+                    Ok(inline_sequence)
                 }
-            }
-        }
-
-        /// Parse paragraph from start tag (already consumed) to end tag (included)
-        fn parse_rule(&mut self) -> BlockElement<'a> {
-            let event = self.iter.next().expect("Unclosed rule");
-            match event {
-                Event::End(Tag::Rule) => BlockElement::Rule,
-                e => panic!("Expected rule events: {:?}", e),
+                e => Err(format!("Parsing paragraph: unexpected {:?}", e)),
             }
         }
 
         /// Parse list from start tag (already consumed) to end tag (included)
         fn parse_list(&mut self, ordered: bool) -> Result<List<'a>, String> {
-            let mut items: Vec<InlineElement<'a>> = Vec::new();
+            let mut items: Vec<ListItem<'a>> = Vec::new();
             loop {
                 match self.iter.next().expect("Unclosed list") {
                     Event::Start(Tag::Item) => items.push(self.parse_list_item()?),
@@ -229,20 +228,48 @@ mod ast {
                 }
             }
         }
-        fn parse_list_item(&mut self) -> Result<InlineElement<'a>, String> {
-            let (inline_str, next) = self.parse_inline();
-            let inline_str = inline_str.expect("Empty inline string");
+        fn parse_list_item(&mut self) -> Result<ListItem<'a>, String> {
+            let (text_content, next) = self.parse_inline_sequence();
             let next_event = next.expect("Unclosed list item");
-            match next_event {
-                Event::End(Tag::Item) => Ok(inline_str),
-                Event::Start(Tag::List(_)) => unimplemented!(),
-                e => panic!("Expected list items: {:?}", e),
+            let sub_list = match next_event {
+                Event::End(Tag::Item) => None,
+                Event::Start(Tag::List(start_i)) => {
+                    let sub_list = self.parse_list(start_i.is_some())?;
+                    match self.iter.next().expect("Unclosed list item") {
+                        Event::End(Tag::Item) => Some(sub_list),
+                        e => return Err(format!("Expected list item end: {:?}", e)),
+                    }
+                }
+                e => return Err(format!("Expected list item: {:?}", e)),
+            };
+            if text_content.len() > 0 {
+                Ok(ListItem {
+                    text_content,
+                    sub_list,
+                })
+            } else {
+                Err("List item with empty text".into())
             }
-            // FIXME loop allowing breaks
         }
 
-        /// Parse one inline text unit (with emphasis / strong).
-        /// Returns no error, and will panic in case of structural errors slipping past the markdown parser.
+        /// Parse a sequence of inline separated by breaks. Sequence may be empty.
+        fn parse_inline_sequence(&mut self) -> (Vec<InlineElement<'a>>, Consumed<'a>) {
+            let mut inline_elements = Vec::new();
+            loop {
+                let (inline, next) = self.parse_inline();
+                if let Some(inline) = inline {
+                    inline_elements.push(inline);
+                }
+                match next {
+                    Some(Event::SoftBreak) => (),
+                    Some(Event::HardBreak) => (),
+                    next => return (inline_elements, next),
+                }
+            }
+        }
+
+        /// Parse one inline text unit (with emphasis / strong), may be empty.
+        /// Will panic in case of structural errors slipping past the markdown parser.
         fn parse_inline(&mut self) -> (Option<InlineElement<'a>>, Consumed<'a>) {
             let opt_cow_len = |s: &Option<Cow<'a, str>>| s.as_ref().map_or(0, |s| s.len());
             // local state
@@ -288,11 +315,11 @@ mod ast {
                     next => break next,
                 }
             };
-            let inline_str = string.map(|string| InlineElement {
+            let inline = string.map(|string| InlineElement {
                 string,
                 strong_parts,
             });
-            (inline_str, next)
+            (inline, next)
         }
     }
 
