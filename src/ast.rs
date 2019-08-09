@@ -301,6 +301,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                     strong_parts.push(start..end)
                 }
                 next => break next,
+                //FIXME: softbreaks in case of multine-span of strong/emphasis will break parsing
             }
         };
         let inline = string.map(|string| InlineElement {

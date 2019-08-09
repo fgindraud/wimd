@@ -1,7 +1,10 @@
-Wimd -- WIki from MarkDown
+Wimd - WIki from MarkDown
 ==========================
 
 Generate a wiki interface from markdown notes.
 
-WIP
+TODO:
+- Post process ast into wiki document
+- Wiki part
+- vim module to autocomplete with existing keywords ?
 
