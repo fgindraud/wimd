@@ -18,10 +18,11 @@ use std::ops::Range;
  * - lists (recursive, ordered or not, specific)
  * - strong tags in any inline: non-semantic highlighting, conserved in output
  * - emphasis tags in any inline: indicate a keyword, removed from output
+ * Restrictions:
+ * - strong/emphasis tags cannot be multiline (not used, and not willing to support).
  *
  * Other elements are deemed not useful for RPG notes for now.
  * Using them will generate a fatal parsing error.
- *
  * Links are not used for keyword definition as they have complex cases to handle.
  */
 
@@ -69,6 +70,10 @@ pub struct InlineElement<'s> {
 
 /******************************************************************************
  * Parsing.
+ *
+ * Parsing error behavior:
+ * - normal error for unsupported parts of markdown.
+ * - panic if the Parser returns unexpected events: unclosed tags, etc.
  */
 
 /// Closure-like struct to allow use of recursive functions for parsing.
@@ -107,7 +112,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
 
     /// Parse section (header + content) from start tag (already consumed) to end of section.
     fn parse_section_of_level(&mut self, level: i32) -> Result<(Section<'s>, Consumed<'s>), Error> {
-        let title = match self.parse_inline() {
+        let title = match self.parse_inline()? {
             (Some(string), Some((Event::End(Tag::Header(n)), _))) => {
                 assert_eq!(n, level);
                 string
@@ -195,7 +200,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
 
     /// Parse paragraph from start tag (already consumed) to end tag (included).
     fn parse_paragraph(&mut self) -> Result<Vec<InlineElement<'s>>, Error> {
-        let (inline_sequence, next) = self.parse_inline_sequence();
+        let (inline_sequence, next) = self.parse_inline_sequence()?;
         let next_event = next.expect("Unclosed paragraph");
         match next_event {
             (Event::End(Tag::Paragraph), _) => {
@@ -218,7 +223,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         }
     }
     fn parse_list_item(&mut self) -> Result<ListItem<'s>, Error> {
-        let (text_content, next) = self.parse_inline_sequence();
+        let (text_content, next) = self.parse_inline_sequence()?;
         let next_event = next.expect("Unclosed list item");
         if text_content.len() == 0 {
             return Err(("List item with empty text".into(), next_event.1));
@@ -241,24 +246,24 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Parse a sequence of inline separated by breaks. Sequence may be empty.
-    fn parse_inline_sequence(&mut self) -> (Vec<InlineElement<'s>>, Consumed<'s>) {
+    fn parse_inline_sequence(&mut self) -> Result<(Vec<InlineElement<'s>>, Consumed<'s>), Error> {
         let mut inline_elements = Vec::new();
         loop {
-            let (inline, next) = self.parse_inline();
+            let (inline, next) = self.parse_inline()?;
             if let Some(inline) = inline {
                 inline_elements.push(inline);
             }
             match next {
                 Some((Event::SoftBreak, _)) => (),
                 Some((Event::HardBreak, _)) => (),
-                next => return (inline_elements, next),
+                next => return Ok((inline_elements, next)),
             }
         }
     }
 
     /// Parse one inline text unit (with emphasis / strong), may be empty.
     /// Will panic in case of structural errors slipping past the markdown parser.
-    fn parse_inline(&mut self) -> (Option<InlineElement<'s>>, Consumed<'s>) {
+    fn parse_inline(&mut self) -> Result<(Option<InlineElement<'s>>, Consumed<'s>), Error> {
         let opt_cow_len = |s: &Option<Cow<'s, str>>| s.as_ref().map_or(0, |s| s.len());
         // local state
         let mut string: Option<Cow<'s, str>> = None;
@@ -283,8 +288,13 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                     assert_eq!(emphasis_start, None);
                     emphasis_start = Some(opt_cow_len(&string))
                 }
-                Some((Event::End(Tag::Emphasis), _)) => {
-                    let start = emphasis_start.take().expect("Not in emphasis block");
+                Some((Event::End(Tag::Emphasis), o)) => {
+                    let start = match emphasis_start.take() {
+                        Some(start) => start,
+                        // Assume Parser is correct and this end tag has a start tag before.
+                        // This end tag is for a start tag on a previous inline.
+                        None => return Err(("Multiline emphasis not supported".into(), o)),
+                    };
                     let string = string.as_ref().expect("Empty emphasis block");
                     let end = string.len();
                     self.keywords.insert(string[start..end].to_string());
@@ -294,21 +304,23 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                     assert_eq!(strong_start, None);
                     strong_start = Some(opt_cow_len(&string))
                 }
-                Some((Event::End(Tag::Strong), _)) => {
-                    let start = strong_start.take().expect("Not in strong block");
+                Some((Event::End(Tag::Strong), o)) => {
+                    let start = match strong_start.take() {
+                        Some(start) => start,
+                        None => return Err(("Multiline strong not supported".into(), o)),
+                    };
                     let string = string.as_ref().expect("Empty strong block");
                     let end = string.len();
                     strong_parts.push(start..end)
                 }
                 next => break next,
-                //FIXME: softbreaks in case of multine-span of strong/emphasis will break parsing
             }
         };
         let inline = string.map(|string| InlineElement {
             string,
             strong_parts,
         });
-        (inline, next)
+        Ok((inline, next))
     }
 }
 
