@@ -1,4 +1,4 @@
-use pulldown_cmark::{CowStr, Event, Parser, Tag};
+use pulldown_cmark::{CowStr, Event, OffsetIter, Parser, Tag};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
@@ -73,45 +73,49 @@ pub struct InlineElement<'s> {
 
 /// Closure-like struct to allow use of recursive functions for parsing.
 struct ParsingState<'s, 'k> {
-    iter: Parser<'s>,
+    iter: OffsetIter<'s>,
     keywords: &'k mut HashSet<String>,
 }
 
 /// Return type for events consumed by not processed by a parsing function.
 /// Returned by functions that require an unexpected event to stop parsing (inline, section).
-type Consumed<'s> = Option<Event<'s>>;
+type Consumed<'s> = Option<(Event<'s>, usize)>;
+
+/// Error message and indicative offset.
+type Error = (String, usize);
 
 impl<'s, 'k> ParsingState<'s, 'k> {
     fn new(text: &'s str, keywords: &'k mut HashSet<String>) -> Self {
         Self {
-            iter: Parser::new(text),
+            iter: Parser::new(text).into_offset_iter(),
             keywords,
         }
     }
 
+    fn consume(&mut self) -> Consumed<'s> {
+        self.iter.next().map(|(e, r)| (e, r.start))
+    }
+
     /// Parse one markdown document. Consumes the parsing state as the iterator is now empty.
-    fn parse_document(mut self) -> Result<Document<'s>, String> {
+    fn parse_document(mut self) -> Result<Document<'s>, Error> {
         let (blocks, sections, next) = self.parse_section_content_at_level(0)?;
         match next {
             None => Ok(Document { blocks, sections }),
-            Some(e) => Err(format!("Unexpected element: {:?}", e)),
+            Some((e, o)) => Err((format!("Unexpected element: {:?}", e), o)),
         }
     }
 
     /// Parse section (header + content) from start tag (already consumed) to end of section.
-    fn parse_section_of_level(
-        &mut self,
-        level: i32,
-    ) -> Result<(Section<'s>, Consumed<'s>), String> {
+    fn parse_section_of_level(&mut self, level: i32) -> Result<(Section<'s>, Consumed<'s>), Error> {
         let title = match self.parse_inline() {
-            (Some(string), Some(Event::End(Tag::Header(n)))) => {
+            (Some(string), Some((Event::End(Tag::Header(n)), _))) => {
                 assert_eq!(n, level);
                 string
             }
-            (_, Some(e)) => {
-                return Err(format!(
-                    "Expected header title for level {}: {:?}",
-                    level, e
+            (_, Some((e, o))) => {
+                return Err((
+                    format!("Expected header title for level {}: {:?}", level, e),
+                    o,
                 ))
             }
             (None, _) => panic!("Header without title"),
@@ -133,7 +137,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     fn parse_section_content_at_level(
         &mut self,
         level: i32,
-    ) -> Result<(Vec<BlockElement<'s>>, Vec<Section<'s>>, Consumed<'s>), String> {
+    ) -> Result<(Vec<BlockElement<'s>>, Vec<Section<'s>>, Consumed<'s>), Error> {
         // Local state
         let mut blocks = Vec::new();
         let mut sub_sections = Vec::new();
@@ -145,7 +149,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
             }
         };
         // Parse all sub sections
-        while let Some(Event::Start(Tag::Header(new_level))) = &mut next {
+        while let Some((Event::Start(Tag::Header(new_level)), o)) = &mut next {
             let new_level = *new_level; // End mut reference to next
             assert!((1..=6).contains(&new_level));
             if new_level <= level {
@@ -157,9 +161,12 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                 sub_sections.push(sub_section);
                 next = new_next
             } else {
-                return Err(format!(
-                    "Header {} is too deep for current level {}",
-                    new_level, level
+                return Err((
+                    format!(
+                        "Header {} is too deep for current level {}",
+                        new_level, level
+                    ),
+                    *o,
                 ));
             }
         }
@@ -167,19 +174,19 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Try to parse a block element.
-    fn try_parse_block(&mut self) -> Result<Result<BlockElement<'s>, Consumed<'s>>, String> {
-        Ok(match self.iter.next() {
-            Some(Event::Start(Tag::Paragraph)) => {
+    fn try_parse_block(&mut self) -> Result<Result<BlockElement<'s>, Consumed<'s>>, Error> {
+        Ok(match self.consume() {
+            Some((Event::Start(Tag::Paragraph), _)) => {
                 Ok(BlockElement::Paragraph(self.parse_paragraph()?))
             }
-            Some(Event::Start(Tag::Rule)) => {
-                let event = self.iter.next().expect("Unclosed rule");
+            Some((Event::Start(Tag::Rule), _)) => {
+                let event = self.consume().expect("Unclosed rule").0;
                 match event {
                     Event::End(Tag::Rule) => Ok(BlockElement::Rule),
                     e => panic!("Expected rule end: {:?}", e),
                 }
             }
-            Some(Event::Start(Tag::List(start_i))) => {
+            Some((Event::Start(Tag::List(start_i)), _)) => {
                 Ok(BlockElement::List(self.parse_list(start_i.is_some())?))
             }
             next => Err(next),
@@ -187,51 +194,50 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Parse paragraph from start tag (already consumed) to end tag (included).
-    fn parse_paragraph(&mut self) -> Result<Vec<InlineElement<'s>>, String> {
+    fn parse_paragraph(&mut self) -> Result<Vec<InlineElement<'s>>, Error> {
         let (inline_sequence, next) = self.parse_inline_sequence();
         let next_event = next.expect("Unclosed paragraph");
         match next_event {
-            Event::End(Tag::Paragraph) => {
+            (Event::End(Tag::Paragraph), _) => {
                 assert!(inline_sequence.len() > 0);
                 Ok(inline_sequence)
             }
-            e => Err(format!("Parsing paragraph: unexpected {:?}", e)),
+            (e, o) => Err((format!("Parsing paragraph: unexpected {:?}", e), o)),
         }
     }
 
     /// Parse list from start tag (already consumed) to end tag (included).
-    fn parse_list(&mut self, ordered: bool) -> Result<List<'s>, String> {
+    fn parse_list(&mut self, ordered: bool) -> Result<List<'s>, Error> {
         let mut items: Vec<ListItem<'s>> = Vec::new();
         loop {
-            match self.iter.next().expect("Unclosed list") {
+            match self.consume().expect("Unclosed list").0 {
                 Event::Start(Tag::Item) => items.push(self.parse_list_item()?),
                 Event::End(Tag::List(_)) => return Ok(List { ordered, items }),
                 e => panic!("Expected list items: {:?}", e),
             }
         }
     }
-    fn parse_list_item(&mut self) -> Result<ListItem<'s>, String> {
+    fn parse_list_item(&mut self) -> Result<ListItem<'s>, Error> {
         let (text_content, next) = self.parse_inline_sequence();
         let next_event = next.expect("Unclosed list item");
+        if text_content.len() == 0 {
+            return Err(("List item with empty text".into(), next_event.1));
+        }
         let sub_list = match next_event {
-            Event::End(Tag::Item) => None,
-            Event::Start(Tag::List(start_i)) => {
+            (Event::End(Tag::Item), _) => None,
+            (Event::Start(Tag::List(start_i)), _) => {
                 let sub_list = self.parse_list(start_i.is_some())?;
-                match self.iter.next().expect("Unclosed list item") {
-                    Event::End(Tag::Item) => Some(sub_list),
-                    e => return Err(format!("Expected list item end: {:?}", e)),
+                match self.consume().expect("Unclosed list item") {
+                    (Event::End(Tag::Item), _) => Some(sub_list),
+                    (e, o) => return Err((format!("Expected list item end: {:?}", e), o)),
                 }
             }
-            e => return Err(format!("Expected list item: {:?}", e)),
+            (e, o) => return Err((format!("Expected list item: {:?}", e), o)),
         };
-        if text_content.len() > 0 {
-            Ok(ListItem {
-                text_content,
-                sub_list,
-            })
-        } else {
-            Err("List item with empty text".into())
-        }
+        Ok(ListItem {
+            text_content,
+            sub_list,
+        })
     }
 
     /// Parse a sequence of inline separated by breaks. Sequence may be empty.
@@ -243,8 +249,8 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                 inline_elements.push(inline);
             }
             match next {
-                Some(Event::SoftBreak) => (),
-                Some(Event::HardBreak) => (),
+                Some((Event::SoftBreak, _)) => (),
+                Some((Event::HardBreak, _)) => (),
                 next => return (inline_elements, next),
             }
         }
@@ -261,8 +267,8 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         let mut emphasis_start: Option<usize> = None;
         // Parse all inline elements
         let next = loop {
-            match self.iter.next() {
-                Some(Event::Text(s)) => match &mut string {
+            match self.consume() {
+                Some((Event::Text(s), _)) => match &mut string {
                     None => {
                         let std_cow = match s {
                             CowStr::Borrowed(b) => Cow::Borrowed(b),
@@ -273,26 +279,26 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                     Some(cow) => cow.to_mut().push_str(&s),
                 },
                 // Emphasis
-                Some(Event::Start(Tag::Emphasis)) => {
+                Some((Event::Start(Tag::Emphasis), _)) => {
                     assert_eq!(emphasis_start, None);
                     emphasis_start = Some(opt_cow_len(&string))
                 }
-                Some(Event::End(Tag::Emphasis)) => {
+                Some((Event::End(Tag::Emphasis), _)) => {
                     let start = emphasis_start.take().expect("Not in emphasis block");
                     let string = string.as_ref().expect("Empty emphasis block");
                     let end = string.len();
                     self.keywords.insert(string[start..end].to_string());
                 }
                 // Strong
-                Some(Event::Start(Tag::Strong)) => {
+                Some((Event::Start(Tag::Strong), _)) => {
                     assert_eq!(strong_start, None);
                     strong_start = Some(opt_cow_len(&string))
                 }
-                Some(Event::End(Tag::Strong)) => {
+                Some((Event::End(Tag::Strong), _)) => {
                     let start = strong_start.take().expect("Not in strong block");
                     let string = string.as_ref().expect("Empty strong block");
                     let end = string.len();
-                    strong_parts.push(start..end);
+                    strong_parts.push(start..end)
                 }
                 next => break next,
             }
@@ -305,9 +311,31 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 }
 
+/// Return the line number at a given offset, starting from 0.
+fn line_number_of_offset(text: &str, offset: usize) -> usize {
+    text.bytes().take(offset).filter(|b| *b == b'\n').count()
+}
+
 /// Parse a single document from a string. Also returns the set of keywords.
 pub fn parse<'s>(text: &'s str) -> Result<(Document<'s>, HashSet<String>), String> {
     let mut keywords = HashSet::new();
-    let document = ParsingState::new(text, &mut keywords).parse_document()?;
-    Ok((document, keywords))
+    match ParsingState::new(text, &mut keywords).parse_document() {
+        Ok(document) => Ok((document, keywords)),
+        Err((msg, offset)) => Err(format!(
+            "At line {}: {}",
+            line_number_of_offset(text, offset) + 1,
+            msg
+        )),
+    }
+}
+
+#[test]
+fn parsing() {
+    // Line number
+    assert_eq!(line_number_of_offset("Blah", 0), 0);
+    assert_eq!(line_number_of_offset("Blah", 4), 0);
+    assert_eq!(line_number_of_offset("\nBlah\n", 0), 0);
+    assert_eq!(line_number_of_offset("\nBlah\n", 1), 1);
+    assert_eq!(line_number_of_offset("\nBlah\n", 5), 1);
+    assert_eq!(line_number_of_offset("\nBlah\n", 6), 2);
 }
