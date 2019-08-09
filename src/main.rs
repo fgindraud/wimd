@@ -1,9 +1,53 @@
+#[macro_use]
+extern crate clap;
 extern crate pulldown_cmark;
 
 /// Parse only a subset of Common Markdown into an intermediate AST object.
 mod ast;
 
+use clap::Arg;
 use std::io::{self, Read};
+
+fn main() -> Result<(), String> {
+    let args = app_from_crate!()
+        .arg(
+            Arg::with_name("tokens")
+                .help("Prints markdown token list and stop")
+                .long("tokens"),
+        )
+        .arg(
+            Arg::with_name("keywords")
+                .help("Prints extracted keyword list and stop")
+                .short("k")
+                .long("keywords"),
+        )
+        .get_matches();
+
+    let text = read_stdin()?;
+
+    if args.is_present("tokens") {
+        // Test print token stream
+        for event in pulldown_cmark::Parser::new(&text) {
+            println!("{:?}", event)
+        }
+        return Ok(());
+    }
+
+    let (ast, keywords) = ast::parse(&text)?;
+
+    if args.is_present("keywords") {
+        let mut keywords: Vec<_> = keywords.into_iter().collect();
+        keywords.sort_unstable();
+        for keyword in keywords {
+            println!("{}", keyword);
+        }
+        return Ok(());
+    }
+
+    // Tests
+    println!("AST: {:?}", ast);
+    Ok(())
+}
 
 fn read_stdin() -> Result<String, String> {
     let mut s = String::new();
@@ -12,23 +56,6 @@ fn read_stdin() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     Ok(s)
 }
-
-fn main() -> Result<(), String> {
-    let text = read_stdin()?;
-    // Test print token stream
-    for event in pulldown_cmark::Parser::new(&text) {
-        println!("{:?}", event)
-    }
-    // Ast test
-    let (root, keywords) = ast::parse(&text)?;
-    println!("AST: {:?}", root);
-    println!("KWDS: {:?}", keywords);
-    Ok(())
-}
-
-// Modes:
-// - wiki : generates a wiki
-// - keyword : extract list of keywords
 
 // Description / Associate many things with keywords:
 // Sentence version "<kwd> : text ; text ; text."
