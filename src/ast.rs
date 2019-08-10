@@ -1,12 +1,10 @@
-use pulldown_cmark::{CowStr, Event, OffsetIter, Parser, Tag};
-use std::borrow::Cow;
+use pulldown_cmark::{Event, OffsetIter, Parser, Tag};
 use std::collections::HashSet;
 use std::ops::Range;
 
 /******************************************************************************
  * Ast definition.
  *
- * All blocks use the lifetime of the parsed text, as it uses Cow to avoid copies.
  * Identified keywords are added to a set separate from the ast during parsing.
  * The variant of supported markdown is CommonMark.
  * All elements of the AST are in order of appearance in the original document.
@@ -28,42 +26,42 @@ use std::ops::Range;
 
 /// Root of a markdown document. Equivalent to a level-0 section with no title.
 #[derive(Debug)]
-pub struct Document<'s> {
-    pub blocks: Vec<BlockElement<'s>>,
-    pub sections: Vec<Section<'s>>,
+pub struct Document {
+    pub blocks: Vec<BlockElement>,
+    pub sections: Vec<Section>,
 }
 
 #[derive(Debug)]
-pub enum BlockElement<'s> {
-    Paragraph(Vec<InlineElement<'s>>),
+pub enum BlockElement {
+    Paragraph(Vec<InlineElement>),
     Rule,
-    List(List<'s>),
+    List(List),
 }
 
 #[derive(Debug)]
-pub struct List<'s> {
+pub struct List {
     pub ordered: bool,
-    pub items: Vec<ListItem<'s>>,
+    pub items: Vec<ListItem>,
 }
 
 #[derive(Debug)]
-pub struct ListItem<'s> {
+pub struct ListItem {
     /// Possibly multiline text. Must be non empty.
-    pub text_content: Vec<InlineElement<'s>>,
-    pub sub_list: Option<List<'s>>,
+    pub text_content: Vec<InlineElement>,
+    pub sub_list: Option<List>,
 }
 
 #[derive(Debug)]
-pub struct Section<'s> {
-    pub title: InlineElement<'s>,
-    pub blocks: Vec<BlockElement<'s>>,
-    pub sub_sections: Vec<Section<'s>>,
+pub struct Section {
+    pub title: InlineElement,
+    pub blocks: Vec<BlockElement>,
+    pub sub_sections: Vec<Section>,
 }
 
 #[derive(Debug)]
-pub struct InlineElement<'s> {
+pub struct InlineElement {
     /// Raw string content without any formatting
-    pub string: Cow<'s, str>,
+    pub string: String,
     /// List of ranges where a strong marker applies (in order, no overlap)
     pub strong_parts: Vec<Range<usize>>,
 }
@@ -102,7 +100,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Parse one markdown document. Consumes the parsing state as the iterator is now empty.
-    fn parse_document(mut self) -> Result<Document<'s>, Error> {
+    fn parse_document(mut self) -> Result<Document, Error> {
         let (blocks, sections, next) = self.parse_section_content_at_level(0)?;
         match next {
             None => Ok(Document { blocks, sections }),
@@ -111,7 +109,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Parse section (header + content) from start tag (already consumed) to end of section.
-    fn parse_section_of_level(&mut self, level: i32) -> Result<(Section<'s>, Consumed<'s>), Error> {
+    fn parse_section_of_level(&mut self, level: i32) -> Result<(Section, Consumed<'s>), Error> {
         let title = match self.parse_inline()? {
             (Some(string), Some((Event::End(Tag::Header(n)), _))) => {
                 assert_eq!(n, level);
@@ -142,7 +140,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     fn parse_section_content_at_level(
         &mut self,
         level: i32,
-    ) -> Result<(Vec<BlockElement<'s>>, Vec<Section<'s>>, Consumed<'s>), Error> {
+    ) -> Result<(Vec<BlockElement>, Vec<Section>, Consumed<'s>), Error> {
         // Local state
         let mut blocks = Vec::new();
         let mut sub_sections = Vec::new();
@@ -179,7 +177,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Try to parse a block element.
-    fn try_parse_block(&mut self) -> Result<Result<BlockElement<'s>, Consumed<'s>>, Error> {
+    fn try_parse_block(&mut self) -> Result<Result<BlockElement, Consumed<'s>>, Error> {
         Ok(match self.consume() {
             Some((Event::Start(Tag::Paragraph), _)) => {
                 Ok(BlockElement::Paragraph(self.parse_paragraph()?))
@@ -199,7 +197,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Parse paragraph from start tag (already consumed) to end tag (included).
-    fn parse_paragraph(&mut self) -> Result<Vec<InlineElement<'s>>, Error> {
+    fn parse_paragraph(&mut self) -> Result<Vec<InlineElement>, Error> {
         let (inline_sequence, next) = self.parse_inline_sequence()?;
         let next_event = next.expect("Unclosed paragraph");
         match next_event {
@@ -212,8 +210,8 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Parse list from start tag (already consumed) to end tag (included).
-    fn parse_list(&mut self, ordered: bool) -> Result<List<'s>, Error> {
-        let mut items: Vec<ListItem<'s>> = Vec::new();
+    fn parse_list(&mut self, ordered: bool) -> Result<List, Error> {
+        let mut items: Vec<ListItem> = Vec::new();
         loop {
             match self.consume().expect("Unclosed list").0 {
                 Event::Start(Tag::Item) => items.push(self.parse_list_item()?),
@@ -222,7 +220,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
             }
         }
     }
-    fn parse_list_item(&mut self) -> Result<ListItem<'s>, Error> {
+    fn parse_list_item(&mut self) -> Result<ListItem, Error> {
         let (text_content, next) = self.parse_inline_sequence()?;
         let next_event = next.expect("Unclosed list item");
         if text_content.len() == 0 {
@@ -246,7 +244,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     }
 
     /// Parse a sequence of inline separated by breaks. Sequence may be empty.
-    fn parse_inline_sequence(&mut self) -> Result<(Vec<InlineElement<'s>>, Consumed<'s>), Error> {
+    fn parse_inline_sequence(&mut self) -> Result<(Vec<InlineElement>, Consumed<'s>), Error> {
         let mut inline_elements = Vec::new();
         loop {
             let (inline, next) = self.parse_inline()?;
@@ -263,10 +261,10 @@ impl<'s, 'k> ParsingState<'s, 'k> {
 
     /// Parse one inline text unit (with emphasis / strong), may be empty.
     /// Will panic in case of structural errors slipping past the markdown parser.
-    fn parse_inline(&mut self) -> Result<(Option<InlineElement<'s>>, Consumed<'s>), Error> {
-        let opt_cow_len = |s: &Option<Cow<'s, str>>| s.as_ref().map_or(0, |s| s.len());
+    fn parse_inline(&mut self) -> Result<(Option<InlineElement>, Consumed<'s>), Error> {
+        let opt_len = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         // local state
-        let mut string: Option<Cow<'s, str>> = None;
+        let mut string: Option<String> = None;
         let mut strong_parts: Vec<Range<usize>> = Vec::new();
         let mut strong_start: Option<usize> = None;
         let mut emphasis_start: Option<usize> = None;
@@ -274,19 +272,13 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         let next = loop {
             match self.consume() {
                 Some((Event::Text(s), _)) => match &mut string {
-                    None => {
-                        let std_cow = match s {
-                            CowStr::Borrowed(b) => Cow::Borrowed(b),
-                            owned => Cow::Owned(owned.to_string()),
-                        };
-                        string = Some(std_cow)
-                    }
-                    Some(cow) => cow.to_mut().push_str(&s),
+                    None => string = Some(s.into_string()),
+                    Some(string) => string.push_str(&s),
                 },
                 // Emphasis
                 Some((Event::Start(Tag::Emphasis), _)) => {
                     assert_eq!(emphasis_start, None);
-                    emphasis_start = Some(opt_cow_len(&string))
+                    emphasis_start = Some(opt_len(&string))
                 }
                 Some((Event::End(Tag::Emphasis), o)) => {
                     let start = match emphasis_start.take() {
@@ -302,7 +294,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                 // Strong
                 Some((Event::Start(Tag::Strong), _)) => {
                     assert_eq!(strong_start, None);
-                    strong_start = Some(opt_cow_len(&string))
+                    strong_start = Some(opt_len(&string))
                 }
                 Some((Event::End(Tag::Strong), o)) => {
                     let start = match strong_start.take() {
@@ -330,7 +322,7 @@ fn line_number_of_offset(text: &str, offset: usize) -> usize {
 }
 
 /// Parse a single document from a string. Also returns the set of keywords.
-pub fn parse<'s>(text: &'s str) -> Result<(Document<'s>, HashSet<String>), String> {
+pub fn parse(text: &str) -> Result<(Document, HashSet<String>), String> {
     let mut keywords = HashSet::new();
     match ParsingState::new(text, &mut keywords).parse_document() {
         Ok(document) => Ok((document, keywords)),
