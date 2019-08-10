@@ -1,8 +1,10 @@
 #[macro_use]
 extern crate clap;
+extern crate indexmap;
 extern crate pulldown_cmark;
+extern crate unicase;
 
-/// Parse only a subset of Common Markdown into an intermediate AST object.
+/// AST for supported subset of markdown syntax, with parsing.
 mod ast;
 
 use clap::Arg;

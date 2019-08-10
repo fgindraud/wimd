@@ -1,6 +1,7 @@
+use indexmap::IndexSet;
 use pulldown_cmark::{Event, OffsetIter, Parser, Tag};
-use std::collections::HashSet;
 use std::ops::Range;
+use unicase::UniCase;
 
 /******************************************************************************
  * Ast definition.
@@ -62,8 +63,16 @@ pub struct Section {
 pub struct InlineElement {
     /// Raw string content without any formatting
     pub string: String,
-    /// List of ranges where a strong marker applies (in order, no overlap)
-    pub strong_parts: Vec<Range<usize>>,
+    /// List of tagged ranges (order FIXME)
+    pub tags: Vec<(Range<usize>, InlineTag)>,
+}
+
+#[derive(Debug)]
+pub enum InlineTag {
+    /// Non semantic highlight, mapped to strong in markdown/html, or bold
+    Highlight,
+    /// Explicit keyword occurrence (using emphasis) with keyword index
+    ExplicitKeyword(usize),
 }
 
 /******************************************************************************
@@ -77,7 +86,7 @@ pub struct InlineElement {
 /// Closure-like struct to allow use of recursive functions for parsing.
 struct ParsingState<'s, 'k> {
     iter: OffsetIter<'s>,
-    keywords: &'k mut HashSet<String>,
+    keywords: &'k mut KeywordSet,
 }
 
 /// Return type for events consumed by not processed by a parsing function.
@@ -88,7 +97,7 @@ type Consumed<'s> = Option<(Event<'s>, usize)>;
 type Error = (String, usize);
 
 impl<'s, 'k> ParsingState<'s, 'k> {
-    fn new(text: &'s str, keywords: &'k mut HashSet<String>) -> Self {
+    fn new(text: &'s str, keywords: &'k mut KeywordSet) -> Self {
         Self {
             iter: Parser::new(text).into_offset_iter(),
             keywords,
@@ -265,7 +274,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         let opt_len = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         // local state
         let mut string: Option<String> = None;
-        let mut strong_parts: Vec<Range<usize>> = Vec::new();
+        let mut tags: Vec<(Range<usize>, InlineTag)> = Vec::new();
         let mut strong_start: Option<usize> = None;
         let mut emphasis_start: Option<usize> = None;
         // Parse all inline elements
@@ -289,7 +298,9 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                     };
                     let string = string.as_ref().expect("Empty emphasis block");
                     let end = string.len();
-                    self.keywords.insert(string[start..end].to_string());
+                    let string = string[start..end].to_string();
+                    let (index, _) = self.keywords.insert_full(UniCase::new(string));
+                    tags.push((start..end, InlineTag::ExplicitKeyword(index)))
                 }
                 // Strong
                 Some((Event::Start(Tag::Strong), _)) => {
@@ -303,15 +314,12 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                     };
                     let string = string.as_ref().expect("Empty strong block");
                     let end = string.len();
-                    strong_parts.push(start..end)
+                    tags.push((start..end, InlineTag::Highlight))
                 }
                 next => break next,
             }
         };
-        let inline = string.map(|string| InlineElement {
-            string,
-            strong_parts,
-        });
+        let inline = string.map(|string| InlineElement { string, tags });
         Ok((inline, next))
     }
 }
@@ -321,9 +329,13 @@ fn line_number_of_offset(text: &str, offset: usize) -> usize {
     text.bytes().take(offset).filter(|b| *b == b'\n').count()
 }
 
+/// Set of keywords: indexed, and case insensitive.
+pub type KeywordSet = IndexSet<UniCase<String>>;
+
 /// Parse a single document from a string. Also returns the set of keywords.
-pub fn parse(text: &str) -> Result<(Document, HashSet<String>), String> {
-    let mut keywords = HashSet::new();
+/// AST after parsing contains explicit keyword occurrences.
+pub fn parse(text: &str) -> Result<(Document, KeywordSet), String> {
+    let mut keywords = IndexSet::new();
     match ParsingState::new(text, &mut keywords).parse_document() {
         Ok(document) => Ok((document, keywords)),
         Err((msg, offset)) => Err(format!(
