@@ -64,17 +64,15 @@ fn read_stdin() -> Result<String, String> {
     Ok(s)
 }
 
-
 type KeywordIndex = usize;
-type InlineIndex = usize;
 struct IndexedDocument {
     root: ast::Document,
     keywords: ast::KeywordSet,
     keyword_details: Vec<KeywordDetail>,
 }
 struct KeywordDetail {
-    explicit_occurrences: Vec<InlineIndex>,
-    implicit_occurrences: Vec<InlineIndex>,
+    explicit_occurrences: Vec<ast::InlineIndex>,
+    implicit_occurrences: Vec<ast::InlineIndex>,
 }
 impl IndexedDocument {
     fn new(document: ast::Document, keywords: ast::KeywordSet) -> IndexedDocument {

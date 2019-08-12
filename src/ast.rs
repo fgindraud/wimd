@@ -61,12 +61,16 @@ pub struct Section {
 
 #[derive(Debug)]
 pub struct InlineElement {
-    //TODO need an index
+    /// Unique index
+    pub index: InlineIndex,
     /// Raw string content without any formatting
     pub string: String,
     /// List of tagged ranges (order FIXME)
     pub tags: Vec<(Range<usize>, InlineTag)>,
 }
+
+/// All InlineElement are indexed by order of appearance in the document.
+pub type InlineIndex = usize;
 
 /// Tags for parts of an inline element. Unless specified, must not overlap.
 #[derive(Debug)]
@@ -91,6 +95,7 @@ pub enum InlineTag {
 struct ParsingState<'s, 'k> {
     iter: OffsetIter<'s>,
     keywords: &'k mut KeywordSet,
+    inline_element_count: usize,
 }
 
 /// Return type for events consumed by not processed by a parsing function.
@@ -105,6 +110,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         Self {
             iter: Parser::new(text).into_offset_iter(),
             keywords,
+            inline_element_count: 0,
         }
     }
 
@@ -323,7 +329,15 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                 next => break next,
             }
         };
-        let inline = string.map(|string| InlineElement { string, tags });
+        let inline = string.map(|string| {
+            let index = self.inline_element_count;
+            self.inline_element_count = self.inline_element_count + 1;
+            InlineElement {
+                index,
+                string,
+                tags,
+            }
+        });
         Ok((inline, next))
     }
 }
@@ -337,7 +351,9 @@ fn line_number_of_offset(text: &str, offset: usize) -> usize {
 pub type KeywordSet = IndexSet<UniCase<String>>;
 
 /// Parse a single document from a string. Also returns the set of keywords.
-/// AST after parsing contains explicit keyword occurrences.
+/// The returned AST only contains explicit keyword occurrences.
+/// The AST should not be modified, as it might break internal indexation.
+/// This is not restricted by the interface for simplicity.
 pub fn parse(text: &str) -> Result<(Document, KeywordSet), String> {
     let mut keywords = IndexSet::new();
     match ParsingState::new(text, &mut keywords).parse_document() {
