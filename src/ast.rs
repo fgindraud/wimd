@@ -61,18 +61,22 @@ pub struct Section {
 
 #[derive(Debug)]
 pub struct InlineElement {
+    //TODO need an index
     /// Raw string content without any formatting
     pub string: String,
     /// List of tagged ranges (order FIXME)
     pub tags: Vec<(Range<usize>, InlineTag)>,
 }
 
+/// Tags for parts of an inline element. Unless specified, must not overlap.
 #[derive(Debug)]
 pub enum InlineTag {
-    /// Non semantic highlight, mapped to strong in markdown/html, or bold
+    /// Non semantic highlight, mapped to strong in markdown/html. May overlap with keyword.
     Highlight,
-    /// Explicit keyword occurrence (using emphasis) with keyword index
+    /// Explicit keyword occurrence (using emphasis) with keyword index.
     ExplicitKeyword(usize),
+    /// Implicit keyword occurrence, found by search of known keywords.
+    ImplicitKeyword(usize),
 }
 
 /******************************************************************************

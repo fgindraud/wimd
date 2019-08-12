@@ -1,8 +1,13 @@
 #[macro_use]
-extern crate clap;
-extern crate indexmap;
-extern crate pulldown_cmark;
-extern crate unicase;
+extern crate clap; // CLI interface
+
+// Data structures
+extern crate indexmap; // Indexed keyword set
+extern crate unicase; // Case insensitive string
+
+// Parsing
+extern crate pulldown_cmark; // Markdown parser
+extern crate regex; // Regex for efficient keyword search
 
 /// AST for supported subset of markdown syntax, with parsing.
 mod ast;
@@ -59,6 +64,24 @@ fn read_stdin() -> Result<String, String> {
     Ok(s)
 }
 
+
+type KeywordIndex = usize;
+type InlineIndex = usize;
+struct IndexedDocument {
+    root: ast::Document,
+    keywords: ast::KeywordSet,
+    keyword_details: Vec<KeywordDetail>,
+}
+struct KeywordDetail {
+    explicit_occurrences: Vec<InlineIndex>,
+    implicit_occurrences: Vec<InlineIndex>,
+}
+impl IndexedDocument {
+    fn new(document: ast::Document, keywords: ast::KeywordSet) -> IndexedDocument {
+        unimplemented!()
+    }
+}
+
 // Description / Associate many things with keywords:
 // Sentence version "<kwd> : text ; text ; text."
 // List version "<kwd>:\n- <text>\n- <text>"
@@ -68,41 +91,3 @@ fn read_stdin() -> Result<String, String> {
 // Wiki : group data by keywords
 // - show data in order of .md file (headings, etc). links for keywords
 // - by keyword, list of sentences organised by heading position
-
-/*struct OriginPosition {
-    lines: ops::Range<usize>,
-    file: usize,
-}
-struct Sentence {
-    sentence: String,
-    heading: HeadingPosition,
-    origin: OriginPosition,
-}
-struct Heading {
-    text: String,
-    sub_headings: Vec<Heading>,
-    sentences: ops::Range<usize>,
-    origin: OriginPosition,
-}
-struct HeadingPosition {
-    file_index: usize,
-    heading_indexes: [Option<usize>; 6],
-}
-struct File {
-    filename: String,
-    headings: Vec<Heading>,
-}
-struct Keyword {
-    keyword: String,
-    in_sentences: Vec<usize>,
-}
-
-struct Database {
-    /// All sentences (not heading)
-    sentences: Vec<Sentence>,
-    /// File & heading tree
-    files: Vec<File>,
-    /// All found keywords
-    keywords: Vec<Keyword>,
-    keyword_indexes: HashMap<String, usize>,
-}*/
