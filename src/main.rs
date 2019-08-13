@@ -51,8 +51,8 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
 
-    // Tests
-    println!("AST: {:?}", ast);
+    let document = IndexedDocument::new(ast, keywords);
+
     Ok(())
 }
 
@@ -68,14 +68,23 @@ type KeywordIndex = usize;
 struct IndexedDocument {
     root: ast::Document,
     keywords: ast::KeywordSet,
-    keyword_details: Vec<KeywordDetail>,
-}
-struct KeywordDetail {
-    explicit_occurrences: Vec<ast::InlineIndex>,
-    implicit_occurrences: Vec<ast::InlineIndex>,
+    explicit_keyword_occurrences: Vec<Vec<ast::InlineIndex>>,
+    implicit_keyword_occurrences: Vec<Vec<ast::InlineIndex>>,
 }
 impl IndexedDocument {
     fn new(document: ast::Document, keywords: ast::KeywordSet) -> IndexedDocument {
+        // Build keyword regex
+        let mut regex_string = String::from(r"\b(wimd|hello)\b");
+        let keyword_regex = regex::RegexBuilder::new(&regex_string)
+            .case_insensitive(true)
+            .unicode(true)
+            .build()
+            .expect("Keyword regex construction");
+        let matches: Vec<&str> = keyword_regex
+            .find_iter("wimd wimdaa hello Wimd")
+            .map(|m| m.as_str())
+            .collect();
+        println!("MATCHES: {:?}", matches);
         unimplemented!()
     }
 }
