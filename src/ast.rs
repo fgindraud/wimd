@@ -26,10 +26,18 @@ use unicase::UniCase;
  */
 
 /// Root of a markdown document. Equivalent to a level-0 section with no title.
+pub type Document = SectionContent;
+
 #[derive(Debug)]
-pub struct Document {
+pub struct Section {
+    pub title: InlineElement,
+    pub content: SectionContent,
+}
+
+#[derive(Debug)]
+pub struct SectionContent {
     pub blocks: Vec<BlockElement>,
-    pub sections: Vec<Section>,
+    pub sub_sections: Vec<Section>,
 }
 
 #[derive(Debug)]
@@ -50,13 +58,6 @@ pub struct ListItem {
     /// Possibly multiline text. Must be non empty.
     pub text_content: Vec<InlineElement>,
     pub sub_list: Option<List>,
-}
-
-#[derive(Debug)]
-pub struct Section {
-    pub title: InlineElement,
-    pub blocks: Vec<BlockElement>,
-    pub sub_sections: Vec<Section>,
 }
 
 #[derive(Debug)]
@@ -120,9 +121,9 @@ impl<'s, 'k> ParsingState<'s, 'k> {
 
     /// Parse one markdown document. Consumes the parsing state as the iterator is now empty.
     fn parse_document(mut self) -> Result<Document, Error> {
-        let (blocks, sections, next) = self.parse_section_content_at_level(0)?;
+        let (root_content, next) = self.parse_section_content_at_level(0)?;
         match next {
-            None => Ok(Document { blocks, sections }),
+            None => Ok(root_content),
             Some((e, o)) => Err((format!("Unexpected element: {:?}", e), o)),
         }
     }
@@ -143,15 +144,8 @@ impl<'s, 'k> ParsingState<'s, 'k> {
             (None, _) => panic!("Header without title"),
             (_, None) => panic!("Unclosed header"),
         };
-        let (blocks, sub_sections, next) = self.parse_section_content_at_level(level)?;
-        Ok((
-            Section {
-                title,
-                blocks,
-                sub_sections,
-            },
-            next,
-        ))
+        let (content, next) = self.parse_section_content_at_level(level)?;
+        Ok((Section { title, content }, next))
     }
 
     /// Parse contents of a section (recursively) : blocks, then sub sections until next lesser header level.
@@ -159,7 +153,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
     fn parse_section_content_at_level(
         &mut self,
         level: i32,
-    ) -> Result<(Vec<BlockElement>, Vec<Section>, Consumed<'s>), Error> {
+    ) -> Result<(SectionContent, Consumed<'s>), Error> {
         // Local state
         let mut blocks = Vec::new();
         let mut sub_sections = Vec::new();
@@ -192,7 +186,13 @@ impl<'s, 'k> ParsingState<'s, 'k> {
                 ));
             }
         }
-        Ok((blocks, sub_sections, next))
+        Ok((
+            SectionContent {
+                blocks,
+                sub_sections,
+            },
+            next,
+        ))
     }
 
     /// Try to parse a block element.
