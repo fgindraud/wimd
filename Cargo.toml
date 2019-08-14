@@ -6,17 +6,21 @@ edition = "2018"
 description = "Generate a wiki from markdown notes."
 
 [dependencies.pulldown-cmark]
+# Markdown parser
 version = "~0.5.3"
 default-features = false # Do not build the binary
 features = ["simd"]
 
 [dependencies.clap]
+# CLI interface
 version = "~2.33.0"
 
 [dependencies.indexmap]
+# Indexed keyword set
 version = "~1.0.2"
 
 [dependencies.unicase]
+# Case insensitive strings
 version = "~2.4.0"
 
 [dependencies.regex]

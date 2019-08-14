@@ -1,13 +1,4 @@
-#[macro_use]
-extern crate clap; // CLI interface
-
-// Data structures
-extern crate indexmap; // Indexed keyword set
-extern crate unicase; // Case insensitive string
-
-// Parsing
-extern crate pulldown_cmark; // Markdown parser
-extern crate regex; // Regex for efficient keyword search
+use clap::{app_from_crate, crate_authors, crate_description, crate_name, crate_version};
 
 /// AST for supported subset of markdown syntax, with parsing.
 mod ast;
