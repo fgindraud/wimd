@@ -11,7 +11,7 @@ use unicase::UniCase;
  * All elements of the AST are in order of appearance in the original document.
  *
  * The supported subset of markdown is:
- * - headers (section titles), cutting text into a tree structure
+ * - headers (sub_section titles), cutting text into a tree structure
  * - paragraphs
  * - horizontal rule
  * - lists (recursive, ordered or not, specific)
@@ -25,7 +25,7 @@ use unicase::UniCase;
  * Links are not used for keyword definition as they have complex cases to handle.
  */
 
-/// Root of a markdown document. Equivalent to a level-0 section with no title.
+/// Root of a markdown document. Equivalent to a level-0 sub_section with no title.
 pub type Document = SectionContent;
 
 #[derive(Debug)]
@@ -85,6 +85,56 @@ pub enum InlineTag {
 }
 
 /******************************************************************************
+ * Access.
+ */
+impl Section {
+    /// Access nested section using the given sequence of indexes.
+    pub fn section<I: Iterator<Item = usize>>(&self, mut indexes: I) -> Option<&Section> {
+        match indexes.next() {
+            None => Some(self),
+            Some(i) => self
+                .content
+                .sub_sections
+                .get(i)
+                .and_then(|s| s.section(indexes)),
+        }
+    }
+    /// Mutable section access.
+    pub fn section_mut<I: Iterator<Item = usize>>(
+        &mut self,
+        mut indexes: I,
+    ) -> Option<&mut Section> {
+        match indexes.next() {
+            None => Some(self),
+            Some(i) => self
+                .content
+                .sub_sections
+                .get_mut(i)
+                .and_then(|s| s.section_mut(indexes)),
+        }
+    }
+}
+impl SectionContent {
+    /// Access nested section from content (useful for Document). Iterator should be non empty.
+    pub fn section<I: Iterator<Item = usize>>(&self, mut indexes: I) -> Option<&Section> {
+        let first = indexes.next()?;
+        self.sub_sections
+            .get(first)
+            .and_then(|s| s.section(indexes))
+    }
+    /// Mutable section access.
+    pub fn section_mut<I: Iterator<Item = usize>>(
+        &mut self,
+        mut indexes: I,
+    ) -> Option<&mut Section> {
+        let first = indexes.next()?;
+        self.sub_sections
+            .get_mut(first)
+            .and_then(|s| s.section_mut(indexes))
+    }
+}
+
+/******************************************************************************
  * Parsing.
  *
  * Parsing error behavior:
@@ -100,7 +150,7 @@ struct ParsingState<'s, 'k> {
 }
 
 /// Return type for events consumed by not processed by a parsing function.
-/// Returned by functions that require an unexpected event to stop parsing (inline, section).
+/// Returned by functions that require an unexpected event to stop parsing (inline, sub_section).
 type Consumed<'s> = Option<(Event<'s>, usize)>;
 
 /// Error message and indicative offset.
@@ -128,7 +178,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         }
     }
 
-    /// Parse section (header + content) from start tag (already consumed) to end of section.
+    /// Parse sub_section (header + content) from start tag (already consumed) to end of sub_section.
     fn parse_section_of_level(&mut self, level: i32) -> Result<(Section, Consumed<'s>), Error> {
         let title = match self.parse_inline()? {
             (Some(string), Some((Event::End(Tag::Header(n)), _))) => {
@@ -148,7 +198,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         Ok((Section { title, content }, next))
     }
 
-    /// Parse contents of a section (recursively) : blocks, then sub sections until next lesser header level.
+    /// Parse contents of a sub_section (recursively) : blocks, then sub sections until next lesser header level.
     /// Assume the current header has just been processed.
     fn parse_section_content_at_level(
         &mut self,
@@ -157,7 +207,7 @@ impl<'s, 'k> ParsingState<'s, 'k> {
         // Local state
         let mut blocks = Vec::new();
         let mut sub_sections = Vec::new();
-        // Parse all blocks before first section
+        // Parse all blocks before first sub_section
         let mut next = loop {
             match self.try_parse_block()? {
                 Ok(block) => blocks.push(block),
@@ -169,10 +219,10 @@ impl<'s, 'k> ParsingState<'s, 'k> {
             let new_level = *new_level; // End mut reference to next
             assert!((1..=6).contains(&new_level));
             if new_level <= level {
-                // End current section, let caller handle this
+                // End current sub_section, let caller handle this
                 break;
             } else if new_level == level + 1 {
-                // Sub section, parse and update next
+                // Sub sub_section, parse and update next
                 let (sub_section, new_next) = self.parse_section_of_level(new_level)?;
                 sub_sections.push(sub_section);
                 next = new_next
