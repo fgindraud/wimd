@@ -95,16 +95,6 @@ impl Section {
             Some(i) => self.content.sub_sections.get(i)?.section(indexes),
         }
     }
-    /// Mutable section access.
-    pub fn section_mut<I: Iterator<Item = usize>>(
-        &mut self,
-        mut indexes: I,
-    ) -> Option<&mut Section> {
-        match indexes.next() {
-            None => Some(self),
-            Some(i) => self.content.sub_sections.get_mut(i)?.section_mut(indexes),
-        }
-    }
 }
 impl SectionContent {
     /// Access nested section from content (useful for Document). Iterator should be non empty.
@@ -112,63 +102,7 @@ impl SectionContent {
         let first = indexes.next()?;
         self.sub_sections.get(first)?.section(indexes)
     }
-    /// Mutable section access.
-    pub fn section_mut<I: Iterator<Item = usize>>(
-        &mut self,
-        mut indexes: I,
-    ) -> Option<&mut Section> {
-        let first = indexes.next()?;
-        self.sub_sections.get_mut(first)?.section_mut(indexes)
-    }
 }
-
-// FIXME replace with actual iterator, or recursive func with callback
-pub struct SectionIndexWalker {
-    /// Sequence of indexes pointing to the current section. If empty indicates the root.
-    current_section: Vec<usize>,
-}
-impl SectionIndexWalker {
-    pub fn new() -> Self {
-        SectionIndexWalker {
-            current_section: Vec::new(),
-        }
-    }
-    pub fn index_slice(&self) -> &[usize] {
-        &self.current_section
-    }
-    pub fn index_iter<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
-        self.current_section.iter().cloned()
-    }
-    pub fn dfs_next(&mut self, document: &Document) -> Result<(), &'static str> {
-        if self.current_section.len() > 0 {
-            let section = document
-                .section(self.index_iter())
-                .ok_or("bad index, document has been changed")?;
-            if section.content.sub_sections.len() > 0 {
-                // Next is first child
-                self.current_section.push(0)
-            } else {
-                // Next is next sibling if it exists
-                while self.current_section.len() > 0 {
-                    *self.current_section.last_mut().unwrap() += 1;
-                    if document.section(self.index_iter()).is_some() {
-                        break;
-                    } else {
-                        // If no next sibling, go down one level and try again
-                        self.current_section.pop();
-                    }
-                }
-            }
-        } else {
-            // We are at document root which is a special case, start with first child
-            if document.sub_sections.len() > 0 {
-                self.current_section.push(0)
-            }
-        }
-        Ok(())
-    }
-}
-
 
 /******************************************************************************
  * Parsing.

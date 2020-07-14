@@ -1,5 +1,3 @@
-use clap::{app_from_crate, crate_authors, crate_description, crate_name, crate_version};
-
 /// AST for supported subset of markdown syntax, with parsing.
 mod ast;
 
@@ -8,6 +6,7 @@ mod document;
 use document::IndexedDocument;
 
 use clap::Arg;
+use clap::{app_from_crate, crate_authors, crate_description, crate_name, crate_version};
 use std::io::{self, Read};
 
 fn main() -> Result<(), String> {
